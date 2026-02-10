@@ -2,6 +2,141 @@
 
 # Changelog
 
+## [0.95.0](https://github.com/tiborsimko/reana-server/compare/v0.9.4...0.95.0) (2026-02-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* **python:** drop support for Python 3.6 and 3.7
+* **gitlab:** The REST API endpoint `gitlab_projects` now includes pagination details.
+
+### Build
+
+* **deps:** pin invenio-userprofiles to 1.2.4 ([#665](https://github.com/tiborsimko/reana-server/issues/665)) ([d6cb168](https://github.com/tiborsimko/reana-server/commit/d6cb16854aea78d852ab43987a44933a9d6fbcad))
+* **docker:** non-editable submodules in "latest" mode ([#656](https://github.com/tiborsimko/reana-server/issues/656)) ([d16fefb](https://github.com/tiborsimko/reana-server/commit/d16fefb421e1d0cc712006c6a697ea67057b1f6c))
+* **docker:** pin setuptools 70 ([#724](https://github.com/tiborsimko/reana-server/issues/724)) ([bd3d24a](https://github.com/tiborsimko/reana-server/commit/bd3d24a5a5768d6ba9ef4aa9b2d31d8c91ce4a9c))
+* **docker:** pin setuptools 70 ([#724](https://github.com/tiborsimko/reana-server/issues/724)) ([26f511e](https://github.com/tiborsimko/reana-server/commit/26f511ed9795f851e46cb0ecdf3085ec12eff71c))
+* **docker:** pin setuptools to v70 ([#696](https://github.com/tiborsimko/reana-server/issues/696)) ([c1b4b71](https://github.com/tiborsimko/reana-server/commit/c1b4b710fee23c2215a5a884bedbd00c90881596))
+* **docker:** upgrade to Ubuntu 24.04 and Python 3.12 ([#692](https://github.com/tiborsimko/reana-server/issues/692)) ([091a9ed](https://github.com/tiborsimko/reana-server/commit/091a9ed327b4f7a28f16e89bab46110c0a463749))
+* **python:** add minimal `pyproject.toml` ([#696](https://github.com/tiborsimko/reana-server/issues/696)) ([6313720](https://github.com/tiborsimko/reana-server/commit/631372081660d7c8e831b351c3db0123cc76c911))
+* **python:** bump all required packages as of 2024-03-04 ([#674](https://github.com/tiborsimko/reana-server/issues/674)) ([f40b82f](https://github.com/tiborsimko/reana-server/commit/f40b82f983d295348a4a5a537b4147a9dc8b6dae))
+* **python:** bump shared modules ([#676](https://github.com/tiborsimko/reana-server/issues/676)) ([47ad3ca](https://github.com/tiborsimko/reana-server/commit/47ad3caab04119568b0f790075784aae59c3818d))
+* **python:** bump shared REANA packages as of 2024-03-04 ([#674](https://github.com/tiborsimko/reana-server/issues/674)) ([aa18394](https://github.com/tiborsimko/reana-server/commit/aa18394458d56806913e224e1b6651a177d18b39))
+* **python:** bump shared REANA packages as of 2024-11-28 ([#714](https://github.com/tiborsimko/reana-server/issues/714)) ([94fbf77](https://github.com/tiborsimko/reana-server/commit/94fbf7766218f4ffaf3f23be64ec6d46be1acb00))
+* **python:** drop support for Python 3.6 and 3.7 ([#683](https://github.com/tiborsimko/reana-server/issues/683)) ([868dee9](https://github.com/tiborsimko/reana-server/commit/868dee9330bf28727f550965416ab6c670d32f9d))
+* **python:** pin setuptools below 81 ([#761](https://github.com/tiborsimko/reana-server/issues/761)) ([8059515](https://github.com/tiborsimko/reana-server/commit/80595156802985af884933e64c73d2886ac30ea2))
+* **python:** remove deprecated `pytest-runner` ([#696](https://github.com/tiborsimko/reana-server/issues/696)) ([20431fe](https://github.com/tiborsimko/reana-server/commit/20431fe5f3fc0e451afa1f4f8e6734bd41b84acc))
+* **python:** use optional deps instead of `tests_require` ([#696](https://github.com/tiborsimko/reana-server/issues/696)) ([9c2a31f](https://github.com/tiborsimko/reana-server/commit/9c2a31f154c4d60d5a1887ca69d7f30525d482f4))
+
+
+### Features
+
+* **api:** add workflow engine versions to info endpoint ([#711](https://github.com/tiborsimko/reana-server/issues/711)) ([999d716](https://github.com/tiborsimko/reana-server/commit/999d71667827dc420ab57ef3c2cca8417622fa65))
+* **config:** add EOSC EU Node AAI SSO login method ([#750](https://github.com/tiborsimko/reana-server/issues/750)) ([bed1ffa](https://github.com/tiborsimko/reana-server/commit/bed1ffa50d326076d243a25531f093cb7539d7fd))
+* **config:** make ACCOUNTS_USERINFO_HEADERS customisable ([#713](https://github.com/tiborsimko/reana-server/issues/713)) ([8c01d51](https://github.com/tiborsimko/reana-server/commit/8c01d513c2365f337c26a2211c2ddb82df4186d4))
+* **config:** make APP_DEFAULT_SECURE_HEADERS customisable ([#713](https://github.com/tiborsimko/reana-server/issues/713)) ([1919358](https://github.com/tiborsimko/reana-server/commit/1919358cb3b05f09bceff9a904e9607760bc3fb1))
+* **config:** make Dask autoscaler configurable ([#702](https://github.com/tiborsimko/reana-server/issues/702)) ([95ea2df](https://github.com/tiborsimko/reana-server/commit/95ea2df5a56177b804ac41e97e3c90ab7e89ce2d))
+* **config:** make number of threads configurable for Dask ([#719](https://github.com/tiborsimko/reana-server/issues/719)) ([5b82925](https://github.com/tiborsimko/reana-server/commit/5b8292541b10126823da8a288dbc3e87591724c0))
+* **config:** make PROXYFIX_CONFIG customisable ([#713](https://github.com/tiborsimko/reana-server/issues/713)) ([5b6c276](https://github.com/tiborsimko/reana-server/commit/5b6c276f57f642cc0965f096fa59875b9599df08))
+* **config:** set maximum limit for number of Dask workers ([#712](https://github.com/tiborsimko/reana-server/issues/712)) ([d36b59b](https://github.com/tiborsimko/reana-server/commit/d36b59bece781b2c4d11b20ea0d9a47630ef2601))
+* **config:** support password-protected redis ([#713](https://github.com/tiborsimko/reana-server/issues/713)) ([a2aad8a](https://github.com/tiborsimko/reana-server/commit/a2aad8ac506b98e5c29d357cec65172b6437cc8f))
+* **ext:** improve error message for db decryption error ([#713](https://github.com/tiborsimko/reana-server/issues/713)) ([bbab1bf](https://github.com/tiborsimko/reana-server/commit/bbab1bf7338e9790e2195a02e320df16db1826f6))
+* **gitlab:** add search query parameter to filter projects ([#681](https://github.com/tiborsimko/reana-server/issues/681)) ([109cf38](https://github.com/tiborsimko/reana-server/commit/109cf38be440e15676e53ec1458ff9efe7d4a395)), closes [#518](https://github.com/tiborsimko/reana-server/issues/518)
+* **gitlab:** add support for paginated project list ([#681](https://github.com/tiborsimko/reana-server/issues/681)) ([4d23c62](https://github.com/tiborsimko/reana-server/commit/4d23c62d57b8ada0d12895fe03190b898b4abd61)), closes [#518](https://github.com/tiborsimko/reana-server/issues/518)
+* **helm:** add initial Dask support ([#701](https://github.com/tiborsimko/reana-server/issues/701)) ([15d0b97](https://github.com/tiborsimko/reana-server/commit/15d0b97a7cc30364bc09870a2bebfef4264e94a0))
+* **rest:** add `live_logs_enabled` property in logs output ([#705](https://github.com/tiborsimko/reana-server/issues/705)) ([c4be985](https://github.com/tiborsimko/reana-server/commit/c4be9854b7817fd6d8b03f06e33948d861e9721a))
+* **rest:** add endpoint for sharing workflows ([#658](https://github.com/tiborsimko/reana-server/issues/658)) ([045d275](https://github.com/tiborsimko/reana-server/commit/045d2752cce08956c73ed14983ff5d6519dc149d))
+* **rest:** add endpoint to get workflow share status ([#658](https://github.com/tiborsimko/reana-server/issues/658)) ([b7d14bb](https://github.com/tiborsimko/reana-server/commit/b7d14bb83284f3f577f096b4110324ec07904651))
+* **rest:** add endpoint to unshare workflows ([#658](https://github.com/tiborsimko/reana-server/issues/658)) ([727c04e](https://github.com/tiborsimko/reana-server/commit/727c04ef7f0a5cfc26f1f2af4213933efcab38f6))
+* **rest:** add endpoints to fetch sharing users ([#658](https://github.com/tiborsimko/reana-server/issues/658)) ([3a1c5ea](https://github.com/tiborsimko/reana-server/commit/3a1c5ea900afb850f5c5e2e4fe0b69275480b9b1))
+* **rest:** add gitlab_host to info endpoint ([#740](https://github.com/tiborsimko/reana-server/issues/740)) ([db12634](https://github.com/tiborsimko/reana-server/commit/db126347293fae4cf77ffeb9ca9f7c0d4eabf844))
+* **rest:** add K8s resource requests & limits to info endpoint ([#724](https://github.com/tiborsimko/reana-server/issues/724)) ([bd3d24a](https://github.com/tiborsimko/reana-server/commit/bd3d24a5a5768d6ba9ef4aa9b2d31d8c91ce4a9c))
+* **rest:** add K8s resource requests & limits to info endpoint ([#724](https://github.com/tiborsimko/reana-server/issues/724)) ([ee2820e](https://github.com/tiborsimko/reana-server/commit/ee2820e3ac0c1c0263e9d119645a2c0b59fd3e1e))
+* **rest:** add share-related parameters to `get_workflows` ([#658](https://github.com/tiborsimko/reana-server/issues/658)) ([a72f1ac](https://github.com/tiborsimko/reana-server/commit/a72f1ac1a95311ef1e048c271b923cc511cf0ac9))
+* **rest:** add user id to get-you endpoint ([#658](https://github.com/tiborsimko/reana-server/issues/658)) ([20246c9](https://github.com/tiborsimko/reana-server/commit/20246c956d1458851212130a7ed1f214bae9ba1f))
+* **rest:** make details available for shared workflows ([#658](https://github.com/tiborsimko/reana-server/issues/658)) ([b274a29](https://github.com/tiborsimko/reana-server/commit/b274a2995fefa0bb1601529bfb05aaa058580205))
+* **sessions:** add recommended images to info endpoint ([#688](https://github.com/tiborsimko/reana-server/issues/688)) ([908aca2](https://github.com/tiborsimko/reana-server/commit/908aca26c4a523bff285ef414bd9a8cb9eba064b))
+
+
+### Bug fixes
+
+* **config:** do not set DEBUG programmatically ([#713](https://github.com/tiborsimko/reana-server/issues/713)) ([c98cbc1](https://github.com/tiborsimko/reana-server/commit/c98cbc1d15afca9309e4839db543ac19cd2036ce))
+* **config:** read secret key from env ([#713](https://github.com/tiborsimko/reana-server/issues/713)) ([6ee6422](https://github.com/tiborsimko/reana-server/commit/6ee6422d87d38339b359ad7a306575b97f210440))
+* **config:** set localhost default value for REANA_HOSTNAME ([#717](https://github.com/tiborsimko/reana-server/issues/717)) ([a24c810](https://github.com/tiborsimko/reana-server/commit/a24c810f018e5fd925d9ad01ce986537adad7ee8))
+* **flask:** avoid deprecated decorator `before_first_request` ([#692](https://github.com/tiborsimko/reana-server/issues/692)) ([6d3fe7d](https://github.com/tiborsimko/reana-server/commit/6d3fe7dcf83ef1fea42dcaae0a15b2b83b4a5e10))
+* **get_workflow_specification:** avoid returning null parameters ([#689](https://github.com/tiborsimko/reana-server/issues/689)) ([46633d6](https://github.com/tiborsimko/reana-server/commit/46633d6bcc151c73880f9ecbd2c02d2246492794))
+* **gitlab:** handle pagination of GitLab webhooks ([#684](https://github.com/tiborsimko/reana-server/issues/684)) ([3f716f7](https://github.com/tiborsimko/reana-server/commit/3f716f7369230ab2a864b6bfcae44a952ca5bf90)), closes [#682](https://github.com/tiborsimko/reana-server/issues/682)
+* **reana-admin:** respect service domain when cleaning sessions ([#687](https://github.com/tiborsimko/reana-server/issues/687)) ([ede882d](https://github.com/tiborsimko/reana-server/commit/ede882d384ae0959eb8a9484b7d491baa628a1ee))
+* **reana-admin:** skip retention rules for deleted workspaces ([#697](https://github.com/tiborsimko/reana-server/issues/697)) ([d1cd1a5](https://github.com/tiborsimko/reana-server/commit/d1cd1a5a593323ba74d8a8053bab32e4a7d903a1))
+* **rest:** add gitlab_host schema definition to info endpoint ([#759](https://github.com/tiborsimko/reana-server/issues/759)) ([464437d](https://github.com/tiborsimko/reana-server/commit/464437d1e324a464d31a598c1845ea3bdcbd1c7c))
+* **rest:** fix workflow sharing endpoints after changes ([#658](https://github.com/tiborsimko/reana-server/issues/658)) ([50495fc](https://github.com/tiborsimko/reana-server/commit/50495fc8a2eca691357eaa307ed3580ed7aac91d))
+* **set_workflow_status:** publish workflows to submission queue ([#691](https://github.com/tiborsimko/reana-server/issues/691)) ([6e35bd7](https://github.com/tiborsimko/reana-server/commit/6e35bd776e17c1bc04145c68c1f5ea3ce5143b7e)), closes [#690](https://github.com/tiborsimko/reana-server/issues/690)
+* **start:** validate endpoint parameters ([#689](https://github.com/tiborsimko/reana-server/issues/689)) ([d2d3673](https://github.com/tiborsimko/reana-server/commit/d2d3673dac8917d746ddafd84bb3660e7f83c9b6))
+
+
+### Code refactoring
+
+* **docs:** move from reST to Markdown ([#671](https://github.com/tiborsimko/reana-server/issues/671)) ([b6d1799](https://github.com/tiborsimko/reana-server/commit/b6d1799552085e1a9c2ad53eafcd572f1af4f3bf))
+* **gitlab:** move all GitLab requests to dedicated client ([#685](https://github.com/tiborsimko/reana-server/issues/685)) ([703af19](https://github.com/tiborsimko/reana-server/commit/703af19e4232af5c9b3ecdefb0b90a60e796605c)), closes [#676](https://github.com/tiborsimko/reana-server/issues/676)
+* **reana-admin:** harmonise `user-uuid` runtime pod label ([#754](https://github.com/tiborsimko/reana-server/issues/754)) ([5ae23c1](https://github.com/tiborsimko/reana-server/commit/5ae23c12086b17bb50414d8d22f40e7c639966cf))
+* **secrets:** adapt to reana-commons secret-handling changes ([#686](https://github.com/tiborsimko/reana-server/issues/686)) ([3596ee0](https://github.com/tiborsimko/reana-server/commit/3596ee058a9888d723a8fcd6247bb14ff1095821))
+
+
+### Code style
+
+* **black:** format with black v24 ([#670](https://github.com/tiborsimko/reana-server/issues/670)) ([6d2b898](https://github.com/tiborsimko/reana-server/commit/6d2b898b2322e6677739fdb1c3bd3916a3cf0887))
+* **python:** adapt code base to the new black version ([#759](https://github.com/tiborsimko/reana-server/issues/759)) ([6c9e55e](https://github.com/tiborsimko/reana-server/commit/6c9e55ebddfb461f7bfe4123ecf2d52916655b4c))
+
+
+### Test suite
+
+* **pytest:** adapt to fixture changes from default_user to user0 ([#658](https://github.com/tiborsimko/reana-server/issues/658)) ([72a6964](https://github.com/tiborsimko/reana-server/commit/72a6964de3c232f23e2f6a9321b98a3a859e2364))
+
+
+### Continuous integration
+
+* **actions:** update GitHub actions due to Node 16 deprecation ([#680](https://github.com/tiborsimko/reana-server/issues/680)) ([b7cc00a](https://github.com/tiborsimko/reana-server/commit/b7cc00afddb5035a3ed8f964ea33fb94bca3e2d8))
+* add hadolint and flake8 linters ([b78d62d](https://github.com/tiborsimko/reana-server/commit/b78d62d77d918498c88f48f9425fe0c1e3cf80b9))
+* added github actions workflow ([247e3a3](https://github.com/tiborsimko/reana-server/commit/247e3a3adfcf298312fd7e85efc60aaf1bc2437d))
+* **commitlint:** addition of commit message linter ([#665](https://github.com/tiborsimko/reana-server/issues/665)) ([2b43ecc](https://github.com/tiborsimko/reana-server/commit/2b43eccdd7587970f92093b4d315a7a90b5f45ac))
+* **commitlint:** allow release commit style ([#675](https://github.com/tiborsimko/reana-server/issues/675)) ([e0299ef](https://github.com/tiborsimko/reana-server/commit/e0299efb273f2c95f88f86261c97a4bc6100786d))
+* **commitlint:** check for the presence of concrete PR number ([#669](https://github.com/tiborsimko/reana-server/issues/669)) ([87c6145](https://github.com/tiborsimko/reana-server/commit/87c6145e636d852ba5fd5ca6fa2cfc23ff6563d2))
+* **commitlint:** fix local running of commit linter on macOS ([#736](https://github.com/tiborsimko/reana-server/issues/736)) ([40b5356](https://github.com/tiborsimko/reana-server/commit/40b535698c9200d61eb62cf53c29d5f918cc5c25))
+* **commitlint:** improve checking of merge commits ([#689](https://github.com/tiborsimko/reana-server/issues/689)) ([69f45fc](https://github.com/tiborsimko/reana-server/commit/69f45fc3aae9bc625ed733de9af13eb7c0111048))
+* **commitlint:** improve checking of merge commits ([#692](https://github.com/tiborsimko/reana-server/issues/692)) ([9a7bd8c](https://github.com/tiborsimko/reana-server/commit/9a7bd8c94b76c0a7942b3f3cbae671fde334e49b))
+* **jsonlint:** add JSON linting ([#732](https://github.com/tiborsimko/reana-server/issues/732)) ([cc3753a](https://github.com/tiborsimko/reana-server/commit/cc3753a522b732ff3c6f3d5ae90262551577cdd6))
+* **markdownlint:** add Markdown linting ([#735](https://github.com/tiborsimko/reana-server/issues/735)) ([d05e5af](https://github.com/tiborsimko/reana-server/commit/d05e5affe0de3153d56183fb8d1ca83b17daad95))
+* pin hadolint version ([2bd2bd4](https://github.com/tiborsimko/reana-server/commit/2bd2bd497dd96c41449f31af9086ee1670bff8df))
+* **prettier:** add Prettier code formatting checks ([#737](https://github.com/tiborsimko/reana-server/issues/737)) ([e04d1fd](https://github.com/tiborsimko/reana-server/commit/e04d1fdd679bc576e685ca0bab978594da775c35))
+* publish docker image after new release ([34131ba](https://github.com/tiborsimko/reana-server/commit/34131bae5506785fc918047fdfdde5c8fb92833b))
+* **pytest:** invoke `pytest` directly instead of `setup.py test` ([#696](https://github.com/tiborsimko/reana-server/issues/696)) ([bd6762f](https://github.com/tiborsimko/reana-server/commit/bd6762fc3ef1a79d5354ac167e0e08383eec9d6c))
+* **pytest:** move to PostgreSQL 14.10 ([#672](https://github.com/tiborsimko/reana-server/issues/672)) ([e888ddd](https://github.com/tiborsimko/reana-server/commit/e888ddd70d8ca17d4567c24b7d78a57bf6f8e060))
+* **release-please:** initial configuration ([#665](https://github.com/tiborsimko/reana-server/issues/665)) ([1d5e7c5](https://github.com/tiborsimko/reana-server/commit/1d5e7c5f4c3d471d0b2028274ec1785b53552d89))
+* **release-please:** update version in Dockerfile/OpenAPI specs ([#668](https://github.com/tiborsimko/reana-server/issues/668)) ([3b3dc41](https://github.com/tiborsimko/reana-server/commit/3b3dc418f40d5ce461e4a7418178f6a8cec2721f))
+* remove older versions from python tests ([28454b9](https://github.com/tiborsimko/reana-server/commit/28454b9741b3a000268cc6a87ea271e4c07588e2))
+* removed pip upgrade ([a6694fa](https://github.com/tiborsimko/reana-server/commit/a6694fa19a355541321d89c3151ca97fd1f5c633))
+* **runners:** upgrade CI runners to Ubuntu 22.04 ([#726](https://github.com/tiborsimko/reana-server/issues/726)) ([bd3d24a](https://github.com/tiborsimko/reana-server/commit/bd3d24a5a5768d6ba9ef4aa9b2d31d8c91ce4a9c))
+* **runners:** upgrade CI runners to Ubuntu 22.04 ([#726](https://github.com/tiborsimko/reana-server/issues/726)) ([b5d4e54](https://github.com/tiborsimko/reana-server/commit/b5d4e541afaaa0e5240c51af324accd08873f2ee))
+* **shellcheck:** fix exit code propagation ([#669](https://github.com/tiborsimko/reana-server/issues/669)) ([d7eac6b](https://github.com/tiborsimko/reana-server/commit/d7eac6b26742797cb1b2c7077071fc3d2053aff1))
+* **shfmt:** add shfmt code formatting checks ([#734](https://github.com/tiborsimko/reana-server/issues/734)) ([1dcc563](https://github.com/tiborsimko/reana-server/commit/1dcc56380adc5987d2ba9becd2de643166542038))
+* update all actions ([b72bc72](https://github.com/tiborsimko/reana-server/commit/b72bc727adaa87e371d982b5e9f20f9361ecbc12))
+* **yamllint:** add YAML linting ([#733](https://github.com/tiborsimko/reana-server/issues/733)) ([c36c461](https://github.com/tiborsimko/reana-server/commit/c36c461352cb19ff3f8b9f2901d7520482065e12))
+
+
+### Documentation
+
+* add .readthedocs.yaml to migrate to RTD v2 ([cf1ecd5](https://github.com/tiborsimko/reana-server/commit/cf1ecd5baec4d792c03b9eac578f69386ddcad68))
+* **authors:** complete list of contributors ([#673](https://github.com/tiborsimko/reana-server/issues/673)) ([71b3f38](https://github.com/tiborsimko/reana-server/commit/71b3f387b0816e23a3315c379ed45af0bb6661a3))
+* remove reana-cluster references ([6255db8](https://github.com/tiborsimko/reana-server/commit/6255db82ddac882a2acef8e909465c256dd6684d))
+* set language to English ([cc7bafa](https://github.com/tiborsimko/reana-server/commit/cc7bafa6c40ad216631bc7ed7665625a4e37e8d4))
+* single-page RTFD outline ([231e0d5](https://github.com/tiborsimko/reana-server/commit/231e0d56626087962391c380e3446a807bc2a927))
+* update openapi.json ([2453cdc](https://github.com/tiborsimko/reana-server/commit/2453cdc77b31a2fd9ca3e4ab5f52fc36df509eaa))
+
+
+### Chores
+
+* **master:** release 0.95.0-alpha.1 ([9fa4059](https://github.com/tiborsimko/reana-server/commit/9fa40595ce840391c4aed999c3d4dda4de7ad2eb))
+
 ## [0.9.4](https://github.com/reanahub/reana-server/compare/0.9.3...0.9.4) (2024-11-29)
 
 ### Build
