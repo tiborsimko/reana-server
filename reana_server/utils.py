@@ -35,13 +35,16 @@ from reana_commons.errors import (
     REANAValidationError,
     REANAEmailNotificationError,
 )
-from reana_commons.utils import get_quota_resource_usage
+from reana_commons.utils import get_dask_component_name, get_quota_resource_usage
 from reana_commons.yadage import yadage_load_from_workspace
 from reana_db.database import Session
 from reana_db.models import (
     ResourceType,
     ResourceUnit,
     RunStatus,
+    Service,
+    ServiceStatus,
+    ServiceType,
     User,
     UserResource,
     UserToken,
@@ -68,6 +71,7 @@ from reana_server.complexity import (
 from reana_server.config import (
     ADMIN_USER_ID,
     REANA_HOSTNAME,
+    REANA_URL,
     REANA_SSO_EOSC_REQUIRED_ENTITLEMENT,
     REANA_USER_EMAIL_CONFIRMATION,
     REANA_WORKFLOW_SCHEDULING_POLICY,
@@ -704,6 +708,36 @@ def get_workspace_retention_rules(
     return retention_rules
 
 
+def workflow_uses_dask(reana_specification: Dict) -> bool:
+    """Check whether a workflow specification requests a Dask service."""
+    return bool(
+        reana_specification.get("workflow", {}).get("resources", {}).get("dask")
+    )
+
+
+def build_dask_service(workflow: Workflow) -> Service:
+    """Build the Dask service DB row for a workflow."""
+    return Service(
+        name=get_dask_component_name(workflow.id_, "database_model_service"),
+        uri=f"{REANA_URL}/{workflow.id_}/dashboard/status",
+        type_=ServiceType.dask,
+        status=ServiceStatus.created,
+    )
+
+
+def ensure_dask_service(workflow: Workflow) -> bool:
+    """Ensure that a Dask workflow has a matching service DB row."""
+    if not workflow_uses_dask(workflow.reana_specification):
+        return False
+
+    service_name = get_dask_component_name(workflow.id_, "database_model_service")
+    if any(s.name == service_name for s in workflow.services):
+        return False
+
+    workflow.services.append(build_dask_service(workflow))
+    return True
+
+
 def clone_workflow(workflow, reana_spec, restart_type):
     """Create a copy of workflow in DB for restarting."""
     reana_specification = reana_spec or workflow.reana_specification
@@ -723,6 +757,8 @@ def clone_workflow(workflow, reana_spec, restart_type):
             restart=True,
             run_number=workflow.run_number,
         )
+        if workflow_uses_dask(reana_specification):
+            cloned_workflow.services.append(build_dask_service(cloned_workflow))
         Session.add(cloned_workflow)
         Session.object_session(cloned_workflow).commit()
         workflow.inactivate_workspace_retention_rules()

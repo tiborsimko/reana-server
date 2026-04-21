@@ -30,11 +30,21 @@ from reana_db.config import SQLALCHEMY_DATABASE_URI
 SQLALCHEMY_TRACK_MODIFICATIONS = False
 """Track modifications flag."""
 
+
+def compose_reana_url(hostname: str, hostport: str | int) -> str:
+    """Compose a REANA URL while omitting the default port."""
+    if str(hostport) == "443":
+        return f"https://{hostname}"
+    return f"https://{hostname}:{hostport}"
+
+
 ADMIN_USER_ID = "00000000-0000-0000-0000-000000000000"
 
 SHARED_VOLUME_PATH = os.getenv("SHARED_VOLUME_PATH", "/var/reana")
 
 REANA_HOSTNAME = os.getenv("REANA_HOSTNAME", "localhost")
+REANA_HOSTPORT = os.getenv("REANA_HOSTPORT", "30443")
+REANA_URL = compose_reana_url(REANA_HOSTNAME, REANA_HOSTPORT)
 
 REANA_SSO_CERN_CONSUMER_KEY = os.getenv("CERN_CONSUMER_KEY", "CHANGE_ME")
 REANA_SSO_CERN_CONSUMER_SECRET = os.getenv("CERN_CONSUMER_SECRET", "CHANGE_ME")
