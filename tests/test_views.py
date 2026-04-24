@@ -352,7 +352,7 @@ def test_set_workflow_status(app, user0, _get_user_mock):
                     "access_token": user0.access_token,
                     "status": "stop",
                 },
-                data=json.dumps(dict(parameters=None)),
+                data=json.dumps({}),
             )
             assert res.status_code == 200
 
