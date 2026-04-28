@@ -764,10 +764,10 @@ def retention_rules_apply(
 
     candidate_rules = Session.query(WorkspaceRetentionRule)
     if workflow:
-        candidate_rules = workflow.retention_rules
+        candidate_rules = candidate_rules.filter_by(workflow_id=workflow.id_)
     elif user:
-        candidate_rules = Session.query(WorkspaceRetentionRule).join(
-            user.workflows.subquery()
+        candidate_rules = candidate_rules.join(Workflow).filter(
+            Workflow.owner_id == user.id_
         )
 
     click.echo("Setting the status of all the rules that will be applied to `pending`")
