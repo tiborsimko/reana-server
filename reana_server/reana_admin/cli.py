@@ -1049,8 +1049,8 @@ def interactive_session_cleanup(
 
         last_activity = datetime.datetime.strptime(
             session_status["last_activity"], "%Y-%m-%dT%H:%M:%S.%f%z"
-        ).replace(tzinfo=None)
-        duration = datetime.datetime.utcnow() - last_activity
+        )
+        duration = datetime.datetime.now(datetime.UTC) - last_activity
         if duration.days >= days:
             if dry_run:
                 click.echo(
