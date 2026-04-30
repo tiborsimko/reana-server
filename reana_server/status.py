@@ -685,10 +685,10 @@ class ClusterHealth:
 class ClusterHealthSchema(Schema):
     """Cluster health marshmallow schema."""
 
-    node = fields.Dict(keys=fields.Str(), values=fields.Int())
-    job = fields.Dict(keys=fields.Str(), values=fields.Int())
-    workflow = fields.Dict(keys=fields.Str(), values=fields.Int())
-    session = fields.Dict(keys=fields.Str(), values=fields.Int())
+    node = fields.Dict(keys=fields.Str(), values=fields.Raw())
+    job = fields.Dict(keys=fields.Str(), values=fields.Raw())
+    workflow = fields.Dict(keys=fields.Str(), values=fields.Raw())
+    session = fields.Dict(keys=fields.Str(), values=fields.Raw())
 
 
 STATUS_OBJECT_TYPES = {
