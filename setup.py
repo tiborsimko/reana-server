@@ -34,7 +34,8 @@ extras_require = {
         "sphinx-click>=1.0.4",
     ],
     "tests": [
-        "pytest-reana>=0.95.0a9,<0.96.0",
+        "reana-commons[kubernetes,yadage,snakemake,cwl,tests]>=0.95.0a15,<0.96.0",
+        "reana-db[tests]>=0.95.0a8,<0.96.0",
     ],
 }
 
