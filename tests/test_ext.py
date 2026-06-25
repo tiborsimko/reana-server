@@ -12,6 +12,8 @@ import pytest
 from flask import Flask
 from invenio_rest import InvenioREST
 from mock import patch
+from marshmallow.exceptions import ValidationError
+from werkzeug.exceptions import UnprocessableEntity
 
 _TEST_ORIGIN = "https://example.com:30443"
 
@@ -89,3 +91,51 @@ def test_cors_non_matching_origin_rejected(ext_app):
     with ext_app.test_client() as client:
         res = client.get("/test", headers={"Origin": "https://example.com"})
     assert "Access-Control-Allow-Origin" not in res.headers
+
+
+def _render_args_validation_error(app, messages):
+    """Return the message an argument-validation failure would produce."""
+    from reana_server.ext import handle_args_validation_error
+
+    error = UnprocessableEntity()
+    error.exc = ValidationError(messages)
+    with app.test_request_context():
+        response, status_code = handle_args_validation_error(error)
+    return response.get_json()["message"], status_code
+
+
+def test_nested_argument_errors_render_the_actual_complaint(ext_app):
+    """Webargs namespaces messages per location; the leaf message must survive."""
+    message, status_code = _render_args_validation_error(
+        ext_app, {"json": {"reana_specification": ["Unknown field."]}}
+    )
+
+    assert status_code == 400
+    # Joining the nested dict directly used to render its keys instead, i.e.
+    # "Field 'json': reana_specification".
+    assert message == "Field 'reana_specification': Unknown field."
+
+
+def test_deeply_nested_argument_errors_keep_their_field_path(ext_app):
+    """Nested schemas and collections keep an unambiguous field path."""
+    message, _status_code = _render_args_validation_error(
+        ext_app, {"json": {"input_parameters": {"nested": ["Not a valid integer."]}}}
+    )
+
+    assert message == "Field 'input_parameters.nested': Not a valid integer."
+
+
+def test_multiple_argument_errors_are_all_reported(ext_app):
+    """Every failing field is reported, not just the first one."""
+    message, _status_code = _render_args_validation_error(
+        ext_app,
+        {
+            "query": {
+                "status": ["Missing data for required field."],
+                "size": ["Not a valid integer."],
+            }
+        },
+    )
+
+    assert "Field 'status': Missing data for required field." in message
+    assert "Field 'size': Not a valid integer." in message

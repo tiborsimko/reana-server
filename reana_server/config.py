@@ -18,11 +18,16 @@ from typing import Optional
 from urllib.parse import quote as _urlquote
 
 from distutils.util import strtobool
+from flask import request
 from limits.util import parse
 from invenio_app.config import APP_DEFAULT_SECURE_HEADERS
+from invenio_app.limiter import set_rate_limit
 from invenio_oauthclient.contrib import cern_openid, eosc_aai
 from invenio_oauthclient.contrib.keycloak import KeycloakSettingsHelper
-from reana_commons.config import REANA_INFRASTRUCTURE_COMPONENTS_HOSTNAMES
+from reana_commons.config import (
+    REANA_INFRASTRUCTURE_COMPONENTS_HOSTNAMES,
+    WORKFLOW_SPECIFICATION_BUNDLES_CAPABILITY,
+)
 from reana_commons.job_utils import kubernetes_memory_to_bytes
 
 # This database URI import is necessary for Invenio-DB
@@ -42,6 +47,59 @@ def compose_reana_url(hostname: str, hostport: str | int) -> str:
 ADMIN_USER_ID = "00000000-0000-0000-0000-000000000000"
 
 SHARED_VOLUME_PATH = os.getenv("SHARED_VOLUME_PATH", "/var/reana")
+
+REANA_API_CAPABILITIES = [WORKFLOW_SPECIFICATION_BUNDLES_CAPABILITY]
+"""Protocol capabilities advertised by the unauthenticated ``/api/ping``.
+
+Capabilities, not version comparisons, decide whether a client operation is
+supported. The list is additive: new protocols append a new string and released
+clients keep ignoring the field."""
+
+REANA_SPEC_BUNDLE_MAX_FILES = int(os.getenv("REANA_SPEC_BUNDLE_MAX_FILES", "1000"))
+"""Maximum number of files accepted in an uploaded specification bundle.
+
+Bounds the staging of an untrusted multipart upload so a client cannot exhaust
+the shared volume with a huge bundle."""
+
+REANA_SPEC_BUNDLE_MAX_BYTES = int(
+    os.getenv("REANA_SPEC_BUNDLE_MAX_BYTES", str(100 * 1024 * 1024))
+)
+"""Maximum cumulative extracted file bytes in a specification bundle."""
+
+REANA_SPEC_BUNDLE_MAX_PATH_BYTES = int(
+    os.getenv("REANA_SPEC_BUNDLE_MAX_PATH_BYTES", "4096")
+)
+"""Maximum UTF-8 byte length of one specification-bundle member path."""
+
+REANA_SPEC_BUNDLE_MAX_REQUEST_BYTES = int(
+    os.getenv(
+        "REANA_SPEC_BUNDLE_MAX_REQUEST_BYTES",
+        str(
+            REANA_SPEC_BUNDLE_MAX_BYTES
+            + REANA_SPEC_BUNDLE_MAX_FILES * (2 * REANA_SPEC_BUNDLE_MAX_PATH_BYTES + 128)
+            + 64 * 1024
+        ),
+    )
+)
+"""Maximum multipart request bytes for a specification bundle.
+
+This is deliberately larger than the extracted-content limit: an uncompressed
+ZIP stores every member name in both its local and central-directory records,
+and multipart framing adds a small fixed overhead. Member-count and path-length
+limits keep this allowance bounded.
+"""
+
+REANA_SPEC_VALIDATION_TIMEOUT = int(os.getenv("REANA_SPEC_VALIDATION_TIMEOUT", "60"))
+"""Wall-clock budget (seconds) used to size the server's read timeout for a
+sandboxed spec validation call.
+
+Read from the same ``REANA_SPEC_VALIDATION_TIMEOUT`` environment variable as
+reana-workflow-controller, which owns the actual sandbox Job
+``activeDeadlineSeconds``; the default matches the controller's so the two agree
+when the variable is unset. This value is *not* the deadline itself -- the
+server derives a longer read timeout from it (``+120s``, above the controller's
+``timeout + 60`` wait) so it never gives up before the controller's sandbox
+deadline elapses."""
 
 REANA_HOSTNAME = os.getenv("REANA_HOSTNAME", "localhost")
 REANA_HOSTPORT = os.getenv("REANA_HOSTPORT", "30443")
@@ -424,8 +482,31 @@ REANA_RATELIMIT_SLOWEST = _get_rate_limit("REANA_RATELIMIT_SLOWEST", "5 per hour
 
 RATELIMIT_PER_ENDPOINT = {
     "launch.launch": REANA_RATELIMIT_SLOW,
+    # Both endpoints can spawn a sandboxed validation Job per call (for
+    # non-serial specs), so throttle them like ``launch`` to bound the rate at
+    # which an authenticated user can drive validator Jobs against the cluster.
+    "workflows.validate_workflow_specification": REANA_RATELIMIT_SLOW,
+    "workflows.create_workflow": REANA_RATELIMIT_SLOW,
+    "workflows.start_workflow": REANA_RATELIMIT_SLOW,
+    # A restart re-loads and re-validates the workspace, which can spawn a
+    # sandboxed validation Job for non-serial specs, so throttle it like start.
+    "workflows.restart_workflow": REANA_RATELIMIT_SLOW,
     "users.request_token": REANA_RATELIMIT_SLOWEST,
 }
+
+
+def set_reana_rate_limit():
+    """Return a slow limit only for the expensive PUT status=start branch."""
+    if (
+        request.endpoint == "workflows.set_workflow_status"
+        and request.args.get("status") == "start"
+    ):
+        return REANA_RATELIMIT_SLOW
+    return set_rate_limit()
+
+
+RATELIMIT_APPLICATION = set_reana_rate_limit
+"""Global rate selector with conditional protection for workflow starts."""
 
 # Invenio-accounts rate limits — only effective in deployments where local
 # accounts are allowed (i.e. ``REANA_SSO_ENABLED`` is false). Setting them
@@ -576,8 +657,26 @@ WORKFLOW_SPEC_EXTENSIONS = [".yaml", ".yml"]
 REGEX_CHARS_TO_REPLACE = re.compile("[^a-zA-Z0-9_]+")
 """Regex matching groups of characters that need to be replaced in workflow names."""
 
-FETCHER_MAXIMUM_FILE_SIZE = 1024**3  # 1 GB
+FETCHER_MAXIMUM_FILE_SIZE = int(
+    os.getenv("REANA_FETCHER_MAXIMUM_FILE_SIZE", str(1024**3))
+)
 """Maximum file size allowed when fetching workflow specifications."""
+
+FETCHER_MAXIMUM_EXTRACTED_SIZE = int(
+    os.getenv("REANA_FETCHER_MAXIMUM_EXTRACTED_SIZE", str(1024**3))
+)
+"""Maximum cumulative regular-file bytes extracted from a remote archive."""
+
+FETCHER_MAXIMUM_FILES = int(os.getenv("REANA_FETCHER_MAXIMUM_FILES", "10000"))
+"""Maximum number of regular files accepted from a remote source snapshot."""
+
+FETCHER_MAXIMUM_CLONE_SIZE = int(
+    os.getenv(
+        "REANA_FETCHER_MAXIMUM_CLONE_SIZE",
+        str(FETCHER_MAXIMUM_FILE_SIZE + FETCHER_MAXIMUM_EXTRACTED_SIZE),
+    )
+)
+"""Maximum temporary bytes used by the generic Git fallback clone."""
 
 FETCHER_ALLOWED_SCHEMES = ["https", "http"]
 """Schemes allowed when fetching workflow specifications."""
@@ -585,18 +684,18 @@ FETCHER_ALLOWED_SCHEMES = ["https", "http"]
 FETCHER_REQUEST_TIMEOUT = 60
 """Timeout used when fetching workflow specifications."""
 
+RWC_MUTATION_CONNECT_TIMEOUT = float(
+    os.getenv("REANA_RWC_MUTATION_CONNECT_TIMEOUT", "10")
+)
+"""Connection timeout for controller calls made under workspace locks."""
+
+RWC_MUTATION_READ_TIMEOUT = float(os.getenv("REANA_RWC_MUTATION_READ_TIMEOUT", "300"))
+"""Read timeout for controller calls made under workspace locks."""
+
 FETCHER_ALLOWED_GITLAB_HOSTNAMES = {"gitlab.com", "gitlab.cern.ch"}
 if REANA_GITLAB_HOST:
     FETCHER_ALLOWED_GITLAB_HOSTNAMES.add(REANA_GITLAB_HOST)
 """GitLab instances allowed when fetching workflow specifications."""
-
-LAUNCHER_ALLOWED_SNAKEMAKE_URLS = [
-    "https://github.com/reanahub/reana-demo-cms-h4l",
-    "https://github.com/reanahub/reana-demo-helloworld",
-    "https://github.com/reanahub/reana-demo-root6-roofit",
-    "https://github.com/reanahub/reana-demo-worldpopulation",
-]
-"""Allowed URLs when launching a Snakemake workflow."""
 
 # Workspace retention rules
 # ==================

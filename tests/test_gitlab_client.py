@@ -99,6 +99,31 @@ def test_gitlab_client_get_file():
     assert res.content == b"file content"
 
 
+def test_gitlab_client_get_repository_archive():
+    """Test streaming an exact GitLab repository snapshot."""
+    response = mock_response()
+
+    def request(verb, url, params, data, stream, timeout):
+        assert verb == "GET"
+        assert (
+            url
+            == "https://gitlab.example.org/api/v4/projects/group%2Frepo/repository/archive.zip"
+        )
+        assert params == {"access_token": "gitlab_token", "sha": "deadbeef"}
+        assert data is None
+        assert stream is True
+        assert timeout == config.FETCHER_REQUEST_TIMEOUT
+        return response
+
+    gitlab_client = GitLabClient(
+        access_token="gitlab_token",
+        host="gitlab.example.org",
+        http_request=request,
+    )
+
+    assert gitlab_client.get_repository_archive("group/repo", "deadbeef") is response
+
+
 def test_gitlab_client_get_projects():
     """Test getting projects from GitLab."""
 

@@ -362,6 +362,15 @@ def request_token(user):
               {
                 "message": "Token is not valid."
               }
+        429:
+          description: Request rate limit exceeded.
+          schema:
+            type: object
+            required:
+              - message
+            properties:
+              message:
+                type: string
         500:
           description: >-
             Request failed. Internal server error.

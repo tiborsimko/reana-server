@@ -8,10 +8,12 @@
 """REANA-Server workflow fetcher tests."""
 
 import os
+import subprocess
 from urllib.request import urlretrieve
 import pytest
 from unittest.mock import MagicMock, Mock, patch
 import zipfile
+import struct
 
 from git import Repo
 
@@ -43,13 +45,13 @@ YAML_URL = "https://raw.githubusercontent.com/reanahub/reana-demo-root6-roofit/m
 @pytest.mark.parametrize(
     "url, expected_fetcher_class",
     [
-        (GIT_URL, WorkflowFetcherGit),
-        (GIT_URL + "/", WorkflowFetcherGit),
-        (GITHUB_REPO_URL, WorkflowFetcherGit),
-        (GITHUB_REPO_URL + "/", WorkflowFetcherGit),
+        (GIT_URL, WorkflowFetcherZip),
+        (GIT_URL + "/", WorkflowFetcherZip),
+        (GITHUB_REPO_URL, WorkflowFetcherZip),
+        (GITHUB_REPO_URL + "/", WorkflowFetcherZip),
         (GITHUB_REPO_ZIP, WorkflowFetcherZip),
-        (GITLAB_REPO_URL, WorkflowFetcherGit),
-        (GITLAB_REPO_URL + "/", WorkflowFetcherGit),
+        (GITLAB_REPO_URL, WorkflowFetcherZip),
+        (GITLAB_REPO_URL + "/", WorkflowFetcherZip),
         (GITLAB_REPO_ZIP, WorkflowFetcherZip),
         (ZENODO_URL, WorkflowFetcherZip),
         (YAML_URL, WorkflowFetcherYaml),
@@ -161,6 +163,101 @@ def test_fetcher_git(with_git_ref, spec, tmp_path):
     assert os.path.isfile(expected_path)
 
 
+def test_fetcher_git_enforces_temporary_clone_limit(tmp_path):
+    """The generic Git fallback is killed before its clone tree grows unbounded."""
+    repository_path = tmp_path / "repository"
+    repository = Repo.init(repository_path, initial_branch="main")
+    (repository_path / "reana.yaml").write_text("x" * 4096)
+    repository.index.add("reana.yaml")
+    repository.index.commit("Add specification")
+
+    fetcher = WorkflowFetcherGit(
+        ParsedUrl(f"file://{repository_path}"), str(tmp_path / "output")
+    )
+    with patch("reana_server.fetcher.FETCHER_MAXIMUM_CLONE_SIZE", 128):
+        with pytest.raises(REANAFetcherError, match="Cannot clone|storage limit"):
+            fetcher.fetch()
+
+
+def test_fetcher_git_timeout_kills_and_reaps_process(tmp_path):
+    """A stalled generic Git process is terminated at the shared deadline."""
+
+    class StalledProcess:
+        def __init__(self):
+            self.pid = 123
+            self.returncode = None
+            self.killed = False
+            self.wait_timeouts = []
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            self.wait_timeouts.append(timeout)
+            if timeout is not None:
+                raise subprocess.TimeoutExpired("git", timeout)
+            return self.returncode
+
+    process = StalledProcess()
+    fetcher = WorkflowFetcherGit(
+        ParsedUrl("https://example.org/repository.git"),
+        str(tmp_path / "output"),
+    )
+    fetcher._clone_tree_exceeds_limits = Mock(return_value=False)
+
+    with patch("reana_server.fetcher.subprocess.Popen", return_value=process), patch(
+        "reana_server.fetcher.resource.prlimit"
+    ), patch("reana_server.fetcher.FETCHER_REQUEST_TIMEOUT", 1), patch(
+        "reana_server.fetcher.time.monotonic", side_effect=[0, 0, 2]
+    ):
+        with pytest.raises(REANAFetcherError, match="timed out"):
+            fetcher._run_bounded_git(["git", "clone"])
+
+    assert process.killed
+    assert process.wait_timeouts == [0.5, None]
+    assert fetcher._clone_tree_exceeds_limits.call_count == 2
+
+
+def test_fetcher_git_fast_completion_keeps_final_strict_scan(tmp_path):
+    """A completed clone is reaped promptly and receives the strict final scan."""
+
+    class CompletingProcess:
+        def __init__(self):
+            self.pid = 123
+            self.returncode = None
+            self.wait_timeouts = []
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.wait_timeouts.append(timeout)
+            self.returncode = 0
+            return self.returncode
+
+        def kill(self):
+            raise AssertionError("successful process must not be killed")
+
+    process = CompletingProcess()
+    fetcher = WorkflowFetcherGit(
+        ParsedUrl("https://example.org/repository.git"),
+        str(tmp_path / "output"),
+    )
+    fetcher._clone_tree_exceeds_limits = Mock(side_effect=[False, False])
+
+    with patch("reana_server.fetcher.subprocess.Popen", return_value=process), patch(
+        "reana_server.fetcher.resource.prlimit"
+    ), patch("reana_server.fetcher.time.monotonic", side_effect=[0, 0]):
+        assert fetcher._run_bounded_git(["git", "clone"])
+
+    assert process.wait_timeouts == [0.5]
+    assert fetcher._clone_tree_exceeds_limits.call_args_list[1].kwargs["strict"]
+
+
 @pytest.mark.parametrize(
     "spec_name, spec_argument",
     [
@@ -261,6 +358,101 @@ def test_fetcher_zip(with_top_level_dir, spec, tmp_path):
         assert os.path.isfile(expected_path)
 
 
+def test_fetcher_zip_counts_directory_entries_towards_limit():
+    """An archive cannot bypass its entry cap using empty directories."""
+    entries = [zipfile.ZipInfo("one/"), zipfile.ZipInfo("two/")]
+    with patch("reana_server.fetcher.FETCHER_MAXIMUM_FILES", 1):
+        with pytest.raises(REANAFetcherError, match="too many archive entries"):
+            WorkflowFetcherZip._validate_archive_entries(entries)
+
+
+def test_fetcher_zip_bounds_depth_and_implicit_directories():
+    """Remote archive metadata cannot create an unbounded directory tree."""
+    with patch("reana_server.fetcher.SPECIFICATION_BUNDLE_MAX_DEPTH", 2):
+        with pytest.raises(REANAFetcherError, match="metadata limits"):
+            WorkflowFetcherZip._validate_archive_entries(
+                [zipfile.ZipInfo("one/two/file")]
+            )
+
+    with patch("reana_server.fetcher._FETCHER_MAXIMUM_DIRECTORIES", 1):
+        with pytest.raises(REANAFetcherError, match="too many directories"):
+            WorkflowFetcherZip._validate_archive_entries(
+                [zipfile.ZipInfo("one/file"), zipfile.ZipInfo("two/file")]
+            )
+
+
+def test_fetcher_git_scan_bounds_directory_breadth(tmp_path):
+    """A clone with few files but excessive directories is rejected."""
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "one").mkdir()
+    (output / "two").mkdir()
+    fetcher = WorkflowFetcherGit(
+        ParsedUrl("https://example.org/repository.git"), str(output)
+    )
+
+    with patch("reana_server.fetcher._FETCHER_MAXIMUM_DIRECTORIES", 1):
+        assert fetcher._clone_tree_exceeds_limits(file_limit=10, strict=True)
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ["a", "a/b"],
+        ["a/b", "a"],
+        ["a", "a/"],
+        ["a/", "a"],
+    ],
+)
+def test_fetcher_zip_rejects_file_ancestor_collision(names):
+    """Remote archives cannot represent a file as a directory or ancestor."""
+    entries = [zipfile.ZipInfo(name) for name in names]
+    with pytest.raises(REANAFetcherError):
+        WorkflowFetcherZip._validate_archive_entries(entries)
+
+
+def test_fetcher_zip_converts_extraction_oserror(monkeypatch, tmp_path):
+    """Filesystem extraction failures use the controlled fetcher error."""
+    archive_path = tmp_path / "archive.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("reana.yaml", "workflow: {}")
+    output_path = tmp_path / "output"
+    output_path.mkdir()
+    fetcher = WorkflowFetcherZip(
+        ParsedUrl("file:///archive.zip"),
+        str(output_path),
+    )
+
+    with zipfile.ZipFile(archive_path) as archive:
+        entries = archive.infolist()
+
+        def fail_makedirs(*args, **kwargs):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr("reana_server.fetcher.os.makedirs", fail_makedirs)
+        with pytest.raises(REANAFetcherError):
+            fetcher._extract_archive_entries(archive, entries)
+
+
+def test_fetcher_rejects_entry_count_before_zipfile(monkeypatch, tmp_path):
+    """Remote archive metadata is bounded before entry materialisation."""
+    archive_path = tmp_path / "archive.zip"
+    archive_path.write_bytes(
+        struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 2, 2, 0, 0, 0)
+    )
+    output_path = tmp_path / "output"
+    output_path.mkdir()
+    fetcher = WorkflowFetcherZip(ParsedUrl("file:///archive.zip"), str(output_path))
+    monkeypatch.setattr("reana_server.fetcher.FETCHER_MAXIMUM_FILES", 1)
+    zip_file = Mock(side_effect=AssertionError("ZipFile must not be constructed"))
+    monkeypatch.setattr("reana_server.fetcher.zipfile.ZipFile", zip_file)
+
+    with pytest.raises(REANAFetcherError, match="too many entries"):
+        fetcher.extract_archive(str(archive_path))
+
+    zip_file.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "url, username, repository, git_ref",
     [
@@ -285,22 +477,26 @@ def test_fetcher_zip(with_top_level_dir, spec, tmp_path):
     ],
 )
 def test_github_fetcher(url, username, repository, git_ref, tmp_path):
-    """Test creating a valid fetcher for GitHub URLs."""
-    mock_git_fetcher = Mock()
-    with patch("reana_server.fetcher.WorkflowFetcherGit", mock_git_fetcher):
+    """GitHub repositories use bounded provider ZIP snapshots."""
+    mock_zip_fetcher = Mock()
+    with patch("reana_server.fetcher.WorkflowFetcherZip", mock_zip_fetcher):
         _get_github_fetcher(ParsedUrl(url), tmp_path)
-        mock_git_fetcher.assert_called_once()
-        expected_repo_url = f"https://github.com/{username}/{repository}.git"
+        mock_zip_fetcher.assert_called_once()
         (
             call_parsed_url,
             call_tmp_path,
-            call_git_ref,
             call_spec,
-        ) = mock_git_fetcher.call_args.args
-        assert call_parsed_url.original_url == expected_repo_url
+            call_workflow_name,
+        ) = mock_zip_fetcher.call_args.args
+        assert call_parsed_url.original_url.startswith(
+            f"https://github.com/{username}/{repository}/archive/"
+        )
+        assert call_parsed_url.original_url.endswith(".zip")
         assert call_tmp_path == tmp_path
-        assert call_git_ref == git_ref
         assert call_spec is None
+        assert call_workflow_name == (
+            repository if not git_ref else f"{repository}-{git_ref}"
+        )
 
 
 @pytest.mark.parametrize(
@@ -375,23 +571,27 @@ def test_invalid_github_fetcher(url, tmp_path):
     ],
 )
 def test_gitlab_fetcher(url, username, repository, git_ref, tmp_path):
-    """Test creating a valid fetcher for GitLab URLs."""
-    mock_git_fetcher = Mock()
-    with patch("reana_server.fetcher.WorkflowFetcherGit", mock_git_fetcher):
+    """GitLab repositories use bounded provider ZIP snapshots."""
+    mock_zip_fetcher = Mock()
+    with patch("reana_server.fetcher.WorkflowFetcherZip", mock_zip_fetcher):
         parsed_url = ParsedUrl(url)
         _get_gitlab_fetcher(ParsedUrl(url), tmp_path)
-        mock_git_fetcher.assert_called_once()
-        expected_repo_url = f"https://{parsed_url.hostname}/{username}/{repository}.git"
+        mock_zip_fetcher.assert_called_once()
         (
             call_parsed_url,
             call_tmp_path,
-            call_git_ref,
             call_spec,
-        ) = mock_git_fetcher.call_args.args
-        assert call_parsed_url.original_url == expected_repo_url
+            call_workflow_name,
+        ) = mock_zip_fetcher.call_args.args
+        assert call_parsed_url.original_url.startswith(
+            f"https://{parsed_url.hostname}/api/v4/projects/"
+        )
+        assert "repository/archive.zip?sha=" in call_parsed_url.original_url
         assert call_tmp_path == tmp_path
-        assert call_git_ref == git_ref
         assert call_spec is None
+        assert call_workflow_name == (
+            repository if not git_ref else f"{repository}-{git_ref}"
+        )
 
 
 @pytest.mark.parametrize(

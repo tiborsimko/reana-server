@@ -42,22 +42,66 @@ def handle_rate_limit_error(error: RateLimitExceeded):
     return jsonify({"message": error_message}), 429
 
 
+ARGUMENT_LOCATIONS = frozenset(
+    {
+        "cookies",
+        "files",
+        "form",
+        "headers",
+        "json",
+        "json_or_form",
+        "match_info",
+        "path",
+        "query",
+        "querystring",
+        "view_args",
+    }
+)
+"""Request locations webargs namespaces its validation messages under."""
+
+
+def _flatten_validation_messages(messages, path=()):
+    """Yield ``(field path, messages)`` leaves of a marshmallow error tree."""
+    if isinstance(messages, dict):
+        for key, value in messages.items():
+            yield from _flatten_validation_messages(value, path + (str(key),))
+    elif isinstance(messages, (list, tuple)):
+        yield path, [str(message) for message in messages]
+    else:
+        yield path, [str(messages)]
+
+
 def handle_args_validation_error(error: UnprocessableEntity):
     """Error handler for werkzeug exception ``UnprocessableEntity``.
 
     This error handler is needed to display useful error messages, instead of the
     generic default one, when marshmallow argument validation fails.
+
+    ``normalized_messages()`` nests the field errors under the request location
+    webargs parsed (and once more per nested schema or collection), so the tree
+    is flattened to leaves. Joining its top-level values directly would render
+    the nested dictionary's *keys* and drop every actual complaint.
+
+    Note that ``/api`` requests are served by Invenio's separate API
+    application, where ``invenio_rest.views.api_errorhandler`` owns 422; this
+    handler therefore only shapes argument errors raised outside that
+    application.
     """
     error_message = error.description or str(error)
 
     exception = getattr(error, "exc", None)
     if isinstance(exception, ValidationError):
         validation_messages = []
-        for field, messages in exception.normalized_messages().items():
+        for path, messages in _flatten_validation_messages(
+            exception.normalized_messages()
+        ):
+            if len(path) > 1 and path[0] in ARGUMENT_LOCATIONS:
+                path = path[1:]
             validation_messages.append(
-                "Field '{}': {}".format(field, ", ".join(messages))
+                "Field '{}': {}".format(".".join(path), ", ".join(messages))
             )
-        error_message = ". ".join(validation_messages)
+        if validation_messages:
+            error_message = ". ".join(validation_messages)
 
     return jsonify({"message": error_message}), 400
 

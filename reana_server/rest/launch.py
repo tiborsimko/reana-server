@@ -10,46 +10,87 @@ import json
 import logging
 import os
 import shutil
-import threading
 import traceback
+import uuid
 
-from bravado.exception import HTTPError
+from bravado.exception import BravadoTimeoutError, HTTPError
 from flask import Blueprint, jsonify
 from jsonschema import ValidationError
 import marshmallow
 from marshmallow import Schema
 from webargs import fields
 from webargs.flaskparser import use_kwargs
-import yaml
 
+from reana_commons.config import SHARED_VOLUME_PATH
 from reana_commons.errors import REANAValidationError, REANAQuotaExceededError
-from reana_commons.specification import load_reana_spec
 from reana_commons.validation.utils import validate_workflow_name
+from reana_db.database import Session
+from reana_db.models import RunStatus
 from reana_db.utils import (
     _get_workflow_with_uuid_or_name,
-    get_disk_usage_or_zero,
+    build_workspace_path,
     store_workflow_disk_quota,
     update_users_disk_quota,
 )
 
 from reana_server.api_client import current_rwc_api_client
-from reana_server.config import FETCHER_ALLOWED_SCHEMES, LAUNCHER_ALLOWED_SNAKEMAKE_URLS
+from reana_server.config import (
+    FETCHER_ALLOWED_SCHEMES,
+    RWC_MUTATION_CONNECT_TIMEOUT,
+    RWC_MUTATION_READ_TIMEOUT,
+)
 from reana_server.decorators import check_quota, signin_required
 from reana_server.fetcher import REANAFetcherError, get_fetcher
+from reana_server.specification_bundles import (
+    seed_workspace,
+    stage_validation_snapshot,
+    workspace_seed_members,
+)
 from reana_server.utils import (
     get_fetched_workflows_dir,
-    mv_workflow_files,
     prevent_disk_quota_excess,
     publish_workflow_submission,
-    filter_input_files,
     get_workspace_retention_rules,
 )
-from reana_server.validation import validate_workflow
+from reana_server.validation import (
+    SpecValidationServiceError,
+    load_and_validate_spec,
+    validate_input_parameters,
+)
+from reana_server.workspace_mutations import (
+    WorkspaceMutationConflict,
+    WorkspaceMutationUnavailable,
+    workflow_creation_mutation_lock,
+)
+from reana_server.workflow_creation import create_workflow_on_controller
 
 blueprint = Blueprint("launch", __name__)
 
-load_reana_spec_lock = threading.Lock()
-"""Lock used to make sure only one specification is loaded at a time."""
+
+def _resolve_created_workflow(response, expected_workflow_uuid, user_id):
+    """Resolve the reserved workflow and remove any controller-created orphan."""
+    returned_workflow_uuid = response.get("workflow_id")
+    if returned_workflow_uuid == expected_workflow_uuid:
+        return _get_workflow_with_uuid_or_name(expected_workflow_uuid, user_id)
+    if returned_workflow_uuid:
+        try:
+            unexpected_workflow = _get_workflow_with_uuid_or_name(
+                returned_workflow_uuid, user_id
+            )
+        except ValueError:
+            pass
+        else:
+            unexpected_workflow.status = RunStatus.deleted
+            Session.commit()
+            shutil.rmtree(unexpected_workflow.workspace_path, ignore_errors=True)
+    raise RuntimeError("Controller returned an unexpected workflow id.")
+
+
+def _compensate_failed_creation(workflow):
+    """Remove a controller-created workflow after an ambiguous failure."""
+    workflow.status = RunStatus.deleted
+    Session.commit()
+    shutil.rmtree(workflow.workspace_path, ignore_errors=True)
 
 
 @blueprint.route("/launch", methods=["POST"])
@@ -147,6 +188,23 @@ def launch(user, url, name="", parameters="{}", specification=None):
               {
                 "message": "Malformed request."
               }
+        429:
+          description: Request rate limit exceeded.
+          schema:
+            type: object
+            required:
+              - message
+            properties:
+              message:
+                type: string
+        409:
+          description: Another workflow-family mutation is in progress.
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        503:
+          description: Workspace mutation or controller service is unavailable.
+          schema:
+            $ref: '#/definitions/ErrorResponse'
         500:
           description: >-
             Request failed. Internal server error.
@@ -161,6 +219,8 @@ def launch(user, url, name="", parameters="{}", specification=None):
                 "message": "Internal server error."
               }
     """
+    tmpdir = None
+    validation_directory = None
     try:
         user_id = str(user.id_)
         tmpdir = get_fetched_workflows_dir(user_id)
@@ -168,41 +228,34 @@ def launch(user, url, name="", parameters="{}", specification=None):
         # Fetch the workflow spec
         fetcher = get_fetcher(url, tmpdir, specification)
         fetcher.fetch()
+        specification_path = fetcher.workflow_spec_path()
 
         # Generate the workflow name
         workflow_name = name.replace(" ", "") or fetcher.generate_workflow_name()
         validate_workflow_name(workflow_name)
 
-        # Load and validate the workflow spec
-        spec_path = fetcher.workflow_spec_path()
-
-        # When launching a snakemake workflow, check if the url is allowed
-        # FIXME: This will not be needed when using a sandbox
-        with open(spec_path) as spec_fd:
-            reana_yaml = yaml.safe_load(spec_fd.read())
-            workflow_type = reana_yaml["workflow"]["type"]
-            if (
-                workflow_type == "snakemake"
-                and url not in LAUNCHER_ALLOWED_SNAKEMAKE_URLS
-            ):
-                raise ValidationError(
-                    "Unfortunately, it is not possible to launch generic Snakemake "
-                    "workflows at the moment. Please contact the REANA admins for "
-                    "more information."
-                )
-
-        # FIXME: locking will not be needed when the loading and validation of
-        # specifications will be done inside an external sandbox
-        with load_reana_spec_lock:
-            reana_yaml = load_reana_spec(spec_path, workspace_path=tmpdir)
+        # Load + validate the spec authoritatively. Loading runs in-process for
+        # serial workflows and inside the sandboxed validator Job for
+        # Snakemake/CWL/Yadage, so the API process never executes untrusted
+        # workflow code. This sandboxing is what makes it safe to launch generic
+        # Snakemake/CWL/Yadage workflows from any URL -- the untrusted spec
+        # loading is confined to the disposable validator Job, not the API
+        # server -- so no per-type URL allowlist is needed. Invalid specs are
+        # rejected here (fail early).
+        (
+            validation_directory,
+            _validation_relative_path,
+            _validation_bytes,
+            _legacy_parameters,
+        ) = stage_validation_snapshot(specification_path, SHARED_VOLUME_PATH)
+        reana_yaml, validation_warnings = load_and_validate_spec(validation_directory)
         input_parameters = json.loads(parameters)
-        validation_warnings = validate_workflow(reana_yaml, input_parameters)
+        original_parameters = reana_yaml.get("inputs", {}).get("parameters", {})
+        validate_input_parameters(input_parameters, original_parameters)
 
-        # Keep only files and directories listed as workflow's inputs
-        filter_input_files(tmpdir, reana_yaml)
-
-        # Check the user's disk quota
-        disk_usage = get_disk_usage_or_zero(tmpdir)
+        # Build the same declared workspace seed a local client would produce:
+        # workflow definition first, datasets/tests only after validation.
+        seed_members, disk_usage = workspace_seed_members(specification_path)
         prevent_disk_quota_excess(
             user, disk_usage, action=f"Launching the workflow {workflow_name}"
         )
@@ -212,28 +265,57 @@ def launch(user, url, name="", parameters="{}", specification=None):
         retention_rules = get_workspace_retention_rules(retention_days)
 
         # Create workflow
+        workflow_uuid = str(uuid.uuid4())
+        workspace_path = build_workspace_path(user_id, workflow_uuid)
         workflow_dict = {
             "reana_specification": reana_yaml,
             "workflow_name": workflow_name,
+            "workflow_id": workflow_uuid,
             "operational_options": {},
             "launcher_url": url,
             "retention_rules": retention_rules,
         }
-        response, http_response = current_rwc_api_client.api.create_workflow(
-            workflow=workflow_dict,
-            user=user_id,
-        ).result()
+        with workflow_creation_mutation_lock(user.id_, workflow_name, workspace_path):
+            response, http_response = create_workflow_on_controller(
+                lambda: current_rwc_api_client.api.create_workflow(
+                    workflow=workflow_dict,
+                    user=user_id,
+                    _request_options={
+                        "connect_timeout": RWC_MUTATION_CONNECT_TIMEOUT,
+                        "timeout": RWC_MUTATION_READ_TIMEOUT,
+                    },
+                ).result(),
+                workflow_uuid,
+                user.id_,
+                workspace_path,
+                _compensate_failed_creation,
+            )
 
-        workflow = _get_workflow_with_uuid_or_name(response["workflow_id"], user_id)
-        mv_workflow_files(tmpdir, workflow.workspace_path)
+            workflow = _resolve_created_workflow(response, workflow_uuid, user_id)
+            if os.path.abspath(workflow.workspace_path) != os.path.abspath(
+                workspace_path
+            ):
+                workflow.status = RunStatus.deleted
+                Session.commit()
+                shutil.rmtree(workflow.workspace_path, ignore_errors=True)
+                raise RuntimeError("Controller created an unexpected workspace path.")
+            try:
+                copied_bytes = seed_workspace(seed_members, workflow.workspace_path)
+                if copied_bytes != disk_usage:
+                    raise REANAValidationError(
+                        "The fetched workflow changed while its workspace was seeded."
+                    )
+            except Exception:
+                workflow.status = RunStatus.deleted
+                Session.commit()
+                shutil.rmtree(workflow.workspace_path, ignore_errors=True)
+                raise
 
-        # Update the workflows's and user's disk usage
-        store_workflow_disk_quota(workflow, bytes_to_sum=disk_usage)
-        update_users_disk_quota(user, bytes_to_sum=disk_usage)
+            store_workflow_disk_quota(workflow, bytes_to_sum=disk_usage)
+            update_users_disk_quota(user, bytes_to_sum=disk_usage)
 
-        # Start the workflow
-        parameters = {"input_parameters": input_parameters}
-        publish_workflow_submission(workflow, user.id_, parameters)
+            parameters = {"input_parameters": input_parameters}
+            publish_workflow_submission(workflow, user.id_, parameters)
         response_data = {
             "workflow_id": workflow.id_,
             "workflow_name": workflow.name,
@@ -248,6 +330,12 @@ def launch(user, url, name="", parameters="{}", specification=None):
     except HTTPError as e:
         logging.error(traceback.format_exc())
         return jsonify(e.response.json()), e.response.status_code
+    except BravadoTimeoutError:
+        return jsonify({"message": "Workflow controller request timed out."}), 503
+    except WorkspaceMutationConflict:
+        return jsonify({"message": "The workflow family is currently changing."}), 409
+    except WorkspaceMutationUnavailable:
+        return jsonify({"message": "Workspace mutation serialization failed."}), 503
     except json.JSONDecodeError:
         logging.error(traceback.format_exc())
         return (
@@ -265,6 +353,11 @@ def launch(user, url, name="", parameters="{}", specification=None):
     ) as e:
         logging.error(traceback.format_exc())
         return jsonify({"message": str(e)}), 400
+    except SpecValidationServiceError as e:
+        # The validation service could not run (not an invalid specification):
+        # surface it as a server-side error, not a "fetching" failure.
+        logging.error(traceback.format_exc())
+        return jsonify({"message": str(e)}), 500
     except Exception:
         logging.error(traceback.format_exc())
         return (
@@ -272,18 +365,14 @@ def launch(user, url, name="", parameters="{}", specification=None):
             500,
         )
     finally:
-        # FIXME: `load_reana_spec` is not thread-safe and it changes the cwd, so for the
-        # time being we can only delete the files inside the directory where the
-        # workflow is fetched.  Deleting the directory would result in a
-        # `FileNotFoundError` when calling `os.getcwd()`, due to the cwd not existing
-        # anymore.
-        #
-        # remove_fetched_workflows_dir(tmpdir)
-        for entry in os.scandir(tmpdir):
-            if entry.is_file() or entry.is_symlink():
-                os.remove(entry)
-            else:
-                shutil.rmtree(entry)
+        # Specification loading now happens in the sandboxed validator (or
+        # in-process for serial, which does not change the cwd), so the previous
+        # cwd/thread-safety limitation no longer applies and we can remove the
+        # whole fetch directory.
+        if validation_directory:
+            shutil.rmtree(validation_directory, ignore_errors=True)
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class LaunchSchema(Schema):
@@ -292,4 +381,4 @@ class LaunchSchema(Schema):
     workflow_id = fields.UUID()
     workflow_name = fields.Str()
     message = fields.Str()
-    validation_warnings = fields.Dict()
+    validation_warnings = fields.Raw()

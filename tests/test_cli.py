@@ -42,6 +42,7 @@ from reana_server.utils import (
     _create_and_associate_reana_user,
     _get_user_from_invenio_user,
 )
+from reana_server.workspace_mutations import WorkspaceMutationConflict
 
 
 def test_export_users(user0):
@@ -732,6 +733,33 @@ def test_retention_rules_apply_error(
     apply_rule_mock.assert_called()
     for rule in workflow.retention_rules:
         assert rule.status == WorkspaceRetentionRuleStatus.active
+
+
+def test_retention_rules_contention_preserves_rule_states(
+    workflow_with_retention_rules, user0
+):
+    """A busy workspace is retried without active/pending state changes."""
+    workflow = workflow_with_retention_rules
+    original_states = {rule.id_: rule.status for rule in workflow.retention_rules}
+
+    with patch(
+        "reana_server.reana_admin.cli.workspace_mutation_lock",
+        side_effect=WorkspaceMutationConflict(),
+    ):
+        result = CliRunner().invoke(
+            reana_admin,
+            [
+                "retention-rules-apply",
+                "--admin-access-token",
+                user0.access_token,
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert "will be retried later" in result.output
+    assert {
+        rule.id_: rule.status for rule in workflow.retention_rules
+    } == original_states
 
 
 def test_retention_rules_extend(workflow_with_retention_rules, user0):

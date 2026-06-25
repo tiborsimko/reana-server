@@ -12,7 +12,7 @@ import yaml
 
 from reana_commons.k8s.secrets import UserSecretsStore
 
-from reana_server.config import REANA_GITLAB_HOST
+from reana_server.config import FETCHER_REQUEST_TIMEOUT, REANA_GITLAB_HOST
 
 
 class GitLabClientException(Exception):
@@ -91,8 +91,12 @@ class GitLabClient:
         quoted = {k: quote_plus(v) for k, v in kwargs.items()}
         return f"https://{self.host}/api/v4/{path.lstrip('/').format(**quoted)}"
 
-    def _request(self, verb: str, url: str, params=None, data=None):
-        res = self._http_request(verb, url, params=params, data=data)
+    def _request(self, verb: str, url: str, params=None, data=None, stream=False):
+        request_kwargs = {"params": params, "data": data}
+        if stream:
+            request_kwargs["stream"] = True
+            request_kwargs["timeout"] = FETCHER_REQUEST_TIMEOUT
+        res = self._http_request(verb, url, **request_kwargs)
         if res.status_code == 401:
             raise GitLabClientInvalidToken
         elif res.status_code >= 400:
@@ -156,6 +160,16 @@ class GitLabClient:
             "ref": ref,
         }
         return self._get(url, params)
+
+    def get_repository_archive(
+        self, project: Union[int, str], ref: str
+    ) -> requests.Response:
+        """Stream a ZIP snapshot for one exact repository reference."""
+        url = self._make_url(
+            "projects/{project}/repository/archive.zip", project=str(project)
+        )
+        params = {"access_token": self.access_token, "sha": ref}
+        return self._request("GET", url, params=params, stream=True)
 
     def get_projects(self, page: int = 1, per_page: Optional[int] = None, **kwargs):
         """Get a list of projects the user has access to.

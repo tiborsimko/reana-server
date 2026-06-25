@@ -62,6 +62,39 @@ def build_openapi_spec(publish):
         plugins=(FlaskPlugin(),),
     )
 
+    spec.components.schema(
+        "ErrorResponse",
+        {
+            "type": "object",
+            "properties": {"message": {"type": "string"}},
+        },
+    )
+    spec.components.schema(
+        "WorkflowSubmissionResponse",
+        {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string"},
+                "workflow_id": {"type": "string"},
+                "workflow_name": {"type": "string"},
+                "run_number": {"type": "string"},
+                "status": {"type": "string"},
+                "user": {"type": "string"},
+                "validation_warnings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "code": {"type": "string"},
+                            "message": {"type": "string"},
+                            "path": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+    )
+
     # Add marshmallow schemas to the specification here
     # spec.definition('Example', schema=Example_schema)
 

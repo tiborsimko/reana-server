@@ -43,7 +43,6 @@ from reana_db.models import (
     WorkspaceRetentionRule,
     WorkspaceRetentionRuleStatus,
 )
-from reana_db.utils import update_workspace_retention_rules
 
 from reana_server.api_client import current_rwc_api_client
 from reana_server.config import ADMIN_USER_ID, REANA_HOSTNAME
@@ -55,6 +54,11 @@ from reana_server.reana_admin.options import (
 )
 from reana_server.reana_admin.retention_rule_deleter import RetentionRuleDeleter
 from reana_server.status import STATUS_OBJECT_TYPES
+from reana_server.workspace_mutations import (
+    WorkspaceMutationConflict,
+    WorkspaceMutationUnavailable,
+    workspace_mutation_lock,
+)
 from reana_server.utils import (
     _get_admin_user_or_raise,
     _create_user,
@@ -790,7 +794,7 @@ def queue_consume(
 @add_user_options
 @add_workflow_option()
 @admin_access_token_option
-def retention_rules_apply(
+def retention_rules_apply(  # noqa: C901
     dry_run: bool,
     force_date: Optional[datetime.datetime],
     yes_i_am_sure: bool,
@@ -834,53 +838,95 @@ def retention_rules_apply(
             Workflow.owner_id == user.id_
         )
 
-    click.echo("Setting the status of all the rules that will be applied to `pending`")
     active_rules = candidate_rules.filter(
         WorkspaceRetentionRule.status == WorkspaceRetentionRuleStatus.active,
         WorkspaceRetentionRule.apply_on < current_time,
     )
-    if not dry_run:
-        update_workspace_retention_rules(
-            active_rules, WorkspaceRetentionRuleStatus.pending
-        )
-
     click.echo("Fetching all the pending rules")
     pending_rules = candidate_rules.filter(
         WorkspaceRetentionRule.status == WorkspaceRetentionRuleStatus.pending
     )
-    if not dry_run:
-        pending_rules = pending_rules.all()
-    else:
-        pending_rules = pending_rules.union(active_rules).all()
+    rules_to_apply = pending_rules.union(active_rules).all()
 
-    if not pending_rules:
+    if not rules_to_apply:
         click.echo("No rules to be applied!")
 
-    for rule in pending_rules:
-        if not Path(rule.workflow.workspace_path).exists():
-            # workspace was deleted, set rule as if it was already applied
+    rules_by_workspace = {}
+    for rule in rules_to_apply:
+        rules_by_workspace.setdefault(rule.workflow.workspace_path, []).append(rule.id_)
+
+    for workspace_path, rule_ids in rules_by_workspace.items():
+        try:
+            with workspace_mutation_lock(workspace_path):
+                # Refresh decisions while holding the same lock used by API
+                # workspace mutations. This closes the restart/delete
+                # check-then-act window and lets stale pending rules retry.
+                rules = (
+                    Session.query(WorkspaceRetentionRule)
+                    .filter(
+                        WorkspaceRetentionRule.id_.in_(rule_ids),
+                        (
+                            WorkspaceRetentionRule.status
+                            == WorkspaceRetentionRuleStatus.pending
+                        )
+                        | (
+                            (
+                                WorkspaceRetentionRule.status
+                                == WorkspaceRetentionRuleStatus.active
+                            )
+                            & (WorkspaceRetentionRule.apply_on < current_time)
+                        ),
+                    )
+                    .all()
+                )
+                if not dry_run:
+                    for rule in rules:
+                        if rule.status == WorkspaceRetentionRuleStatus.active:
+                            rule.status = WorkspaceRetentionRuleStatus.pending
+                    Session.commit()
+
+                for rule in rules:
+                    if not Path(workspace_path).exists():
+                        click.secho(
+                            f"Workspace {workspace_path} of rule {rule.id_} does not "
+                            "exist, setting the status to `applied`",
+                            fg="red",
+                        )
+                        if not dry_run:
+                            rule.status = WorkspaceRetentionRuleStatus.applied
+                        continue
+
+                    next_status = WorkspaceRetentionRuleStatus.active
+                    try:
+                        RetentionRuleDeleter(rule).apply_rule(dry_run)
+                        next_status = WorkspaceRetentionRuleStatus.applied
+                    except Exception as error:
+                        click.secho(
+                            f"Error while applying rule {rule.id_}: {error}", fg="red"
+                        )
+                        logging.debug(error, exc_info=True)
+                    if not dry_run:
+                        click.echo(
+                            f"Setting the status of rule {rule.id_} to "
+                            f"`{next_status.name}`"
+                        )
+                        rule.status = next_status
+                if not dry_run:
+                    Session.commit()
+        except WorkspaceMutationConflict:
+            Session.rollback()
+            click.echo(
+                f"Workspace {workspace_path} is currently being modified; "
+                "retention rules will be retried later."
+            )
+        except WorkspaceMutationUnavailable:
+            Session.rollback()
             click.secho(
-                f"Workspace {rule.workflow.workspace_path} of rule {rule.id_} does not exist, "
-                "setting the status to `applied`",
+                f"Could not serialize retention rules for workspace {workspace_path}; "
+                "they will be retried later.",
                 fg="red",
             )
-            update_workspace_retention_rules(
-                [rule], WorkspaceRetentionRuleStatus.applied
-            )
-            continue
-        # if there are errors, the status of the rule will be reset to `active`
-        # so that the rule will be applied again at the next execution of the cronjob
-        next_status = WorkspaceRetentionRuleStatus.active
-        try:
-            RetentionRuleDeleter(rule).apply_rule(dry_run)
-            next_status = WorkspaceRetentionRuleStatus.applied
-        except Exception as e:
-            click.secho(f"Error while applying rule {rule.id_}: {e}", fg="red")
-            logging.debug(e, exc_info=True)
-
-        if not dry_run:
-            click.echo(f"Setting the status of rule {rule.id_} to `{next_status.name}`")
-            update_workspace_retention_rules([rule], next_status)
+            logging.exception("Workspace mutation locking is unavailable.")
 
 
 @reana_admin.command()

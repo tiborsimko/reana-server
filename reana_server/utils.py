@@ -23,7 +23,6 @@ from typing import Dict, List, Optional, Tuple, Union
 from uuid import UUID, uuid4
 
 import click
-import yaml
 from flask import url_for
 from invenio_oauthclient.errors import OAuthClientUnAuthorized
 from jinja2 import Environment, PackageLoader, select_autoescape
@@ -37,7 +36,6 @@ from reana_commons.errors import (
     REANAEmailNotificationError,
 )
 from reana_commons.utils import get_dask_component_name, get_quota_resource_usage
-from reana_commons.yadage import yadage_load_from_workspace
 from reana_db.database import Session
 from reana_db.models import (
     ResourceType,
@@ -89,7 +87,7 @@ from reana_server.gitlab_client import (
     GitLabClient,
     GitLabClientException,
 )
-from reana_server.validation import validate_retention_rule, validate_workflow
+from reana_server.validation import validate_retention_rule, validate_loaded_spec
 
 
 def is_uuid_v4(uuid_or_name):
@@ -431,18 +429,6 @@ def serialize_utc_datetime(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() + "Z" if dt else None
 
 
-def _load_and_save_yadage_spec(workflow: Workflow, operational_options: Dict):
-    """Load and save in DB the Yadage workflow specification."""
-    operational_options.update({"accept_metadir": True})
-    toplevel = operational_options.get("toplevel", "")
-    workflow.reana_specification = yadage_load_from_workspace(
-        workflow.workspace_path,
-        workflow.reana_specification,
-        toplevel,
-    )
-    Session.commit()
-
-
 def _get_admin_user_or_raise(*, requested_via: str) -> User:
     """Return the configured admin user or raise on server misconfiguration."""
     admin = Session.query(User).filter_by(id_=ADMIN_USER_ID).one_or_none()
@@ -667,18 +653,21 @@ def _get_user_from_invenio_user(id):
 
 
 def _get_reana_yaml_from_gitlab(webhook_data, user_id):
-    reana_yaml = "reana.yaml"
+    """Return immutable GitLab source metadata from a workflow webhook.
+
+    The specification itself is loaded later from the bounded archive for the
+    exact commit SHA. Fetching ``reana.yaml`` separately from the moving branch
+    would introduce a race and duplicate the source of truth.
+    """
+    del user_id
     if webhook_data["object_kind"] == "push":
         branch = webhook_data["project"]["default_branch"]
         commit_sha = webhook_data["checkout_sha"]
     elif webhook_data["object_kind"] == "merge_request":
         branch = webhook_data["object_attributes"]["source_branch"]
         commit_sha = webhook_data["object_attributes"]["last_commit"]["id"]
-    project_id = webhook_data["project"]["id"]
-    gitlab_client = GitLabClient.from_k8s_secret(user_id)
-    yaml_file = gitlab_client.get_file(project_id, reana_yaml, branch).content
     return (
-        yaml.safe_load(yaml_file),
+        None,
         webhook_data["project"]["path_with_namespace"],
         webhook_data["project"]["name"],
         branch,
@@ -735,7 +724,7 @@ def _get_gitlab_hook_id(project_id, gitlab_client: GitLabClient):
 
 
 class RequestStreamWithLen(object):
-    """Wrap ``request.stream`` object to have ``__len__`` attribute.
+    """Wrap a request stream to have an exact ``__len__`` attribute.
 
     Users can upload files to REANA through REANA-Server (RS). RS passes then
     the content of the file uploads to the next REANA component,
@@ -754,16 +743,26 @@ class RequestStreamWithLen(object):
     Requests stream upload.
     """
 
-    def __init__(self, limitedstream):
-        """Wrap the stream to have ``len``."""
+    def __init__(self, limitedstream, content_length=None):
+        """Wrap the stream to have ``len``.
+
+        :param limitedstream: Stream to expose to Requests.
+        :param content_length: Optional exact number of bytes remaining in the
+            stream. Multipart uploads use a seekable Werkzeug temporary stream
+            which does not expose the ``limit`` attribute used by
+            ``request.stream``.
+        """
         self.limitedstream = limitedstream
+        self.content_length = content_length
 
     def read(self, *args, **kwargs):
         """Expose ``request.stream``s read method."""
         return self.limitedstream.read(*args, **kwargs)
 
     def __len__(self):
-        """Expose the length of the ``request.stream``."""
+        """Expose the exact number of bytes forwarded to the controller."""
+        if self.content_length is not None:
+            return self.content_length
         if not hasattr(self.limitedstream, "limit"):
             return 0
         return self.limitedstream.limit
@@ -831,10 +830,11 @@ def ensure_dask_service(workflow: Workflow) -> bool:
     return True
 
 
-def clone_workflow(workflow, reana_spec, restart_type):
+def clone_workflow(workflow, reana_spec, restart_type, validate_spec=True):
     """Create a copy of workflow in DB for restarting."""
     reana_specification = reana_spec or workflow.reana_specification
-    validate_workflow(reana_specification, input_parameters={})
+    if validate_spec:
+        validate_loaded_spec(reana_specification)
 
     retention_days = reana_specification.get("workspace", {}).get("retention_days")
     retention_rules = get_workspace_retention_rules(retention_days)
@@ -853,15 +853,24 @@ def clone_workflow(workflow, reana_spec, restart_type):
         if workflow_uses_dask(reana_specification):
             cloned_workflow.services.append(build_dask_service(cloned_workflow))
         Session.add(cloned_workflow)
-        Session.object_session(cloned_workflow).commit()
-        workflow.inactivate_workspace_retention_rules()
-        cloned_workflow.set_workspace_retention_rules(retention_rules)
+        workflow.inactivate_workspace_retention_rules(commit=False)
+        cloned_workflow.set_workspace_retention_rules(retention_rules, commit=False)
+        Session.commit()
         return cloned_workflow
     except SQLAlchemyError as e:
+        Session.rollback()
         message = "Database connection failed, please retry."
         logging.error(
-            f"Error while creating {cloned_workflow.id_}: {message}\n{e}", exc_info=True
+            f"Error while creating a restart of workflow {workflow.id_}: "
+            f"{message}\n{e}",
+            exc_info=True,
         )
+        # Re-raise so callers never receive ``None`` (which would surface as an
+        # opaque AttributeError/500); this maps to a 500 with a retry hint.
+        raise RuntimeError(message) from e
+    except Exception:
+        Session.rollback()
+        raise
 
 
 def _get_user_by_criteria(id_: Optional[str], email: Optional[str]) -> Optional[User]:

@@ -10,26 +10,42 @@
 
 from abc import ABC, abstractmethod
 import os
+import posixpath
+import resource
 import shutil
+import stat
+import subprocess
+import time
 from typing import Any, List, Mapping, Optional, Sequence
-from urllib.parse import urlparse
+from urllib.parse import quote, quote_plus, urlparse
 import zipfile
 
-from git import Repo
 import requests
 from requests.exceptions import HTTPError, Timeout, RequestException
 import werkzeug.exceptions
 import werkzeug.routing
 
+from reana_commons.specification_paths import (
+    SPECIFICATION_BUNDLE_MAX_DEPTH,
+    SPECIFICATION_BUNDLE_MAX_PATH_BYTES,
+)
+
 from reana_server.config import (
     FETCHER_ALLOWED_GITLAB_HOSTNAMES,
     FETCHER_ALLOWED_SCHEMES,
+    FETCHER_MAXIMUM_CLONE_SIZE,
+    FETCHER_MAXIMUM_EXTRACTED_SIZE,
     FETCHER_MAXIMUM_FILE_SIZE,
+    FETCHER_MAXIMUM_FILES,
     FETCHER_REQUEST_TIMEOUT,
     REGEX_CHARS_TO_REPLACE,
     WORKFLOW_SPEC_EXTENSIONS,
     WORKFLOW_SPEC_FILENAMES,
 )
+from reana_server.specification_bundles import preflight_zip_metadata
+
+_GIT_CLONE_POLL_INTERVAL = 0.5
+_FETCHER_MAXIMUM_DIRECTORIES = FETCHER_MAXIMUM_FILES * 2 + 1024
 
 
 class REANAFetcherError(Exception):
@@ -232,30 +248,176 @@ class WorkflowFetcherGit(WorkflowFetcherBase):
 
     def fetch(self) -> None:
         """Fetch workflow specification from a Git repository."""
-        try:
-            repository = Repo.clone_from(
-                self._parsed_url.original_url,
-                self._output_dir,
-                depth=1,
-                no_single_branch=True,
-                env={"GIT_TERMINAL_PROMPT": "0"},
-            )
-        except Exception:
+        clone_command = [
+            "git",
+            "clone",
+            "--depth=1",
+            "--no-single-branch",
+            self._parsed_url.original_url,
+            self._output_dir,
+        ]
+        if not self._run_bounded_git(clone_command):
             raise REANAFetcherError(
                 "Cannot clone the given Git repository. Please check that the provided "
                 "URL is correct and that the repository is publicly accessible."
             )
 
         if self._git_ref:
-            try:
-                repository.remote().fetch(self._git_ref, depth=1)
-                repository.git.checkout(self._git_ref)
-            except Exception:
+            fetch_command = [
+                "git",
+                "-C",
+                self._output_dir,
+                "fetch",
+                "--depth=1",
+                "origin",
+                self._git_ref,
+            ]
+            checkout_command = [
+                "git",
+                "-C",
+                self._output_dir,
+                "checkout",
+                "--detach",
+                "FETCH_HEAD",
+            ]
+            if not self._run_bounded_git(fetch_command) or not self._run_bounded_git(
+                checkout_command
+            ):
                 raise REANAFetcherError(
                     f'Cannot checkout the given Git reference "{self._git_ref}"'
                 )
 
         shutil.rmtree(os.path.join(self._output_dir, ".git"))
+        file_count = 0
+        total_size = 0
+        for root, directories, files in os.walk(
+            self._output_dir, topdown=True, followlinks=False
+        ):
+            for directory in directories:
+                path = os.path.join(root, directory)
+                if os.path.islink(path):
+                    raise REANAFetcherError(
+                        "Remote source repositories may not contain symbolic links"
+                    )
+            for filename in files:
+                path = os.path.join(root, filename)
+                mode = os.lstat(path).st_mode
+                if not stat.S_ISREG(mode):
+                    raise REANAFetcherError(
+                        "Remote source repositories may contain only regular files"
+                    )
+                file_count += 1
+                total_size += os.lstat(path).st_size
+                if file_count > FETCHER_MAXIMUM_FILES:
+                    raise REANAFetcherError("Remote source contains too many files")
+                if total_size > FETCHER_MAXIMUM_EXTRACTED_SIZE:
+                    raise REANAFetcherError("Remote source extracted size exceeded")
+
+    def _run_bounded_git(self, command: Sequence[str]) -> bool:
+        """Run Git while bounding its temporary clone tree."""
+        environment = dict(os.environ)
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+
+        def kill_and_reap(process) -> None:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+
+        try:
+            process = subprocess.Popen(
+                command,
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            resource.prlimit(
+                process.pid,
+                resource.RLIMIT_FSIZE,
+                (FETCHER_MAXIMUM_CLONE_SIZE, FETCHER_MAXIMUM_CLONE_SIZE),
+            )
+        except (OSError, ValueError):
+            if "process" in locals():
+                kill_and_reap(process)
+            return False
+
+        clone_file_limit = FETCHER_MAXIMUM_FILES * 2 + 1024
+        deadline = time.monotonic() + FETCHER_REQUEST_TIMEOUT
+        try:
+            while process.poll() is None:
+                if self._clone_tree_exceeds_limits(clone_file_limit, strict=False):
+                    raise REANAFetcherError(
+                        "Remote Git clone exceeded its temporary storage limit"
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise REANAFetcherError("Remote Git clone timed out")
+                try:
+                    process.wait(timeout=min(_GIT_CLONE_POLL_INTERVAL, remaining))
+                except subprocess.TimeoutExpired:
+                    pass
+        except Exception:
+            kill_and_reap(process)
+            raise
+        # A fast clone can finish between polling intervals. Check its final
+        # on-disk state before the caller removes the temporary ``.git`` tree.
+        if self._clone_tree_exceeds_limits(clone_file_limit, strict=True):
+            raise REANAFetcherError(
+                "Remote Git clone exceeded its temporary storage limit"
+            )
+        return process.returncode == 0
+
+    def _clone_tree_exceeds_limits(self, file_limit: int, strict: bool) -> bool:
+        """Return whether the current temporary Git tree exceeds its bounds."""
+        file_count = 0
+        directory_count = 0
+        total_size = 0
+        pending = [(self._output_dir, "")]
+        while pending:
+            root, relative_root = pending.pop()
+            try:
+                entries = os.scandir(root)
+            except OSError as error:
+                if strict:
+                    raise REANAFetcherError(
+                        "Could not inspect the completed remote Git clone"
+                    ) from error
+                continue
+            with entries:
+                for entry in entries:
+                    relative_path = posixpath.join(relative_root, entry.name)
+                    if (
+                        len(relative_path.encode("utf-8"))
+                        > SPECIFICATION_BUNDLE_MAX_PATH_BYTES
+                        or len(relative_path.split("/"))
+                        > SPECIFICATION_BUNDLE_MAX_DEPTH
+                    ):
+                        return True
+                    try:
+                        metadata = os.lstat(entry.path)
+                    except OSError as error:
+                        if strict:
+                            raise REANAFetcherError(
+                                "Could not inspect the completed remote Git clone"
+                            ) from error
+                        continue
+                    if stat.S_ISDIR(metadata.st_mode):
+                        directory_count += 1
+                        if directory_count > _FETCHER_MAXIMUM_DIRECTORIES:
+                            return True
+                        pending.append((entry.path, relative_path))
+                        continue
+                    if not stat.S_ISREG(metadata.st_mode):
+                        if strict:
+                            return True
+                        continue
+                    file_count += 1
+                    total_size += metadata.st_size
+                    if (
+                        file_count > file_limit
+                        or total_size > FETCHER_MAXIMUM_CLONE_SIZE
+                    ):
+                        return True
+        return False
 
     def generate_workflow_name(self) -> str:
         """Generate a workflow name from the given repository URL.
@@ -338,13 +500,146 @@ class WorkflowFetcherZip(WorkflowFetcherBase):
         """Fetch workflow specification from a zip archive."""
         archive_path = os.path.join(self._output_dir, self._archive_name)
         self._download_file(self._parsed_url.original_url, archive_path)
-        try:
-            with zipfile.ZipFile(archive_path, "r") as zip_file:
-                zip_file.extractall(path=self._output_dir)
-        except zipfile.BadZipfile:
-            raise REANAFetcherError("The provided zip file is not valid")
+        self.extract_archive(archive_path)
 
-        os.remove(archive_path)
+    @staticmethod
+    def _validate_archive_entries(entries) -> None:
+        """Validate remote ZIP metadata before creating any output files."""
+        if len(entries) > FETCHER_MAXIMUM_FILES:
+            raise REANAFetcherError(
+                "Remote source contains too many archive entries "
+                f"(maximum is {FETCHER_MAXIMUM_FILES})"
+            )
+        declared_size = 0
+        names = set()
+        file_names = set()
+        directories = set()
+        for entry in entries:
+            name = entry.filename
+            normalized = posixpath.normpath(name)
+            if (
+                not name
+                or "\x00" in name
+                or "\\" in name
+                or name.startswith("/")
+                or (len(name) >= 2 and name[1] == ":")
+                or normalized in (".", "..")
+                or normalized != name.rstrip("/")
+                or any(part in ("", ".", "..") for part in normalized.split("/"))
+            ):
+                raise REANAFetcherError(
+                    f"Remote source contains an unsafe path: {name}"
+                )
+            components = normalized.split("/")
+            if (
+                len(name.encode("utf-8")) > SPECIFICATION_BUNDLE_MAX_PATH_BYTES
+                or len(components) > SPECIFICATION_BUNDLE_MAX_DEPTH
+            ):
+                raise REANAFetcherError(
+                    f"Remote source path exceeds its metadata limits: {name}"
+                )
+            for index in range(1, len(components)):
+                directories.add("/".join(components[:index]))
+                if len(directories) > _FETCHER_MAXIMUM_DIRECTORIES:
+                    raise REANAFetcherError(
+                        "Remote source contains too many directories"
+                    )
+            if normalized in names:
+                raise REANAFetcherError(
+                    f"Remote source contains a duplicate path: {normalized}"
+                )
+            names.add(normalized)
+            mode = (entry.external_attr >> 16) & 0xFFFF
+            file_type = stat.S_IFMT(mode)
+            if entry.is_dir():
+                if file_type not in (0, stat.S_IFDIR):
+                    raise REANAFetcherError(
+                        f"Remote source contains a non-directory entry: {name}"
+                    )
+                continue
+            if entry.flag_bits & 0x1:
+                raise REANAFetcherError(
+                    "Encrypted remote source archives are not supported"
+                )
+            if file_type not in (0, stat.S_IFREG):
+                raise REANAFetcherError(
+                    f"Remote source contains a non-regular file: {name}"
+                )
+            file_names.add(normalized)
+            declared_size += entry.file_size
+            if declared_size > FETCHER_MAXIMUM_EXTRACTED_SIZE:
+                raise REANAFetcherError("Remote source extracted size exceeded")
+        for name in names:
+            components = name.split("/")
+            for index in range(1, len(components)):
+                parent = "/".join(components[:index])
+                if parent in file_names:
+                    raise REANAFetcherError(
+                        f"Remote source path is nested below a regular file: {parent}"
+                    )
+
+    def _extract_archive_entries(self, zip_file, entries) -> None:
+        """Extract validated remote ZIP members using exclusive regular files."""
+        extracted_size = 0
+        for entry in entries:
+            destination = os.path.join(
+                self._output_dir, *entry.filename.rstrip("/").split("/")
+            )
+            try:
+                if entry.is_dir():
+                    os.makedirs(destination, mode=0o700, exist_ok=True)
+                    continue
+                os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                descriptor = os.open(destination, flags, 0o600)
+                with zip_file.open(entry, "r") as source, os.fdopen(
+                    descriptor, "wb"
+                ) as output:
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        extracted_size += len(chunk)
+                        if extracted_size > FETCHER_MAXIMUM_EXTRACTED_SIZE:
+                            raise REANAFetcherError(
+                                "Remote source extracted size exceeded"
+                            )
+                        output.write(chunk)
+            except REANAFetcherError:
+                if not entry.is_dir():
+                    try:
+                        os.unlink(destination)
+                    except OSError:
+                        pass
+                raise
+            except (OSError, EOFError, RuntimeError, zipfile.BadZipFile) as exc:
+                if not entry.is_dir():
+                    try:
+                        os.unlink(destination)
+                    except OSError:
+                        pass
+                raise REANAFetcherError(
+                    f"Could not extract remote source entry {entry.filename}: {exc}"
+                )
+
+    def extract_archive(self, archive_path: str) -> None:
+        """Safely extract an already downloaded archive into the output tree."""
+        try:
+            with open(archive_path, "rb") as archive_stream:
+                preflight_zip_metadata(archive_stream, FETCHER_MAXIMUM_FILES)
+                with zipfile.ZipFile(archive_stream, "r") as zip_file:
+                    entries = zip_file.infolist()
+                    self._validate_archive_entries(entries)
+                    self._extract_archive_entries(zip_file, entries)
+        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            raise REANAFetcherError(f"The provided zip file is not valid: {exc}")
+        finally:
+            try:
+                os.remove(archive_path)
+            except OSError:
+                pass
 
         if not self._discover_workflow_specs():
             top_level_entries = [
@@ -369,6 +664,43 @@ class WorkflowFetcherZip(WorkflowFetcherBase):
         :returns: Generated workflow name.
         """
         return self._workflow_name
+
+
+def extract_streamed_zip_response(
+    response,
+    output_dir: str,
+    spec: Optional[str] = None,
+    workflow_name: str = "workflow",
+) -> WorkflowFetcherZip:
+    """Bound and safely extract a streamed provider ZIP response."""
+    archive_path = os.path.join(output_dir, ".reana-source-archive.zip")
+    downloaded = 0
+    try:
+        with open(archive_path, "xb") as archive:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                downloaded += len(chunk)
+                if downloaded > FETCHER_MAXIMUM_FILE_SIZE:
+                    raise REANAFetcherError("Maximum file size exceeded")
+                archive.write(chunk)
+        fetcher = WorkflowFetcherZip(
+            ParsedUrl("https://invalid.example/source.zip"),
+            output_dir,
+            spec=spec,
+            workflow_name=workflow_name,
+        )
+        fetcher.extract_archive(archive_path)
+        return fetcher
+    finally:
+        try:
+            response.close()
+        except Exception:
+            pass
+        try:
+            os.remove(archive_path)
+        except OSError:
+            pass
 
 
 def _match_url(parsed_url: ParsedUrl, rules: Sequence[str]) -> Mapping[str, Any]:
@@ -426,8 +758,12 @@ def _get_github_fetcher(
         workflow_name = f"{repository}-{git_ref}"
         return WorkflowFetcherZip(parsed_url, output_dir, spec, workflow_name)
     else:
-        repository_url = ParsedUrl(f"https://github.com/{username}/{repository}.git")
-        return WorkflowFetcherGit(repository_url, output_dir, git_ref, spec)
+        archive_ref = quote(git_ref or "HEAD", safe="/")
+        archive_url = ParsedUrl(
+            f"https://github.com/{username}/{repository}/archive/{archive_ref}.zip"
+        )
+        workflow_name = repository if not git_ref else f"{repository}-{git_ref}"
+        return WorkflowFetcherZip(archive_url, output_dir, spec, workflow_name)
 
 
 def _get_gitlab_fetcher(
@@ -467,10 +803,14 @@ def _get_gitlab_fetcher(
         workflow_name = parsed_url.basename_without_extension
         return WorkflowFetcherZip(parsed_url, output_dir, spec, workflow_name)
     else:
-        repository_url = ParsedUrl(
-            f"https://{parsed_url.hostname}/{username}/{repository}.git"
+        project = quote_plus(f"{username}/{repository}")
+        archive_ref = quote(git_ref or "HEAD", safe="")
+        archive_url = ParsedUrl(
+            f"https://{parsed_url.hostname}/api/v4/projects/{project}/"
+            f"repository/archive.zip?sha={archive_ref}"
         )
-        return WorkflowFetcherGit(repository_url, output_dir, git_ref, spec)
+        workflow_name = repository if not git_ref else f"{repository}-{git_ref}"
+        return WorkflowFetcherZip(archive_url, output_dir, spec, workflow_name)
 
 
 def get_fetcher(
