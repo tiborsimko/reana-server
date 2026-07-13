@@ -7,17 +7,45 @@
 """REANA-Server tests for utils module."""
 
 from datetime import datetime
+import os
 import pathlib
+import stat
 
 import pytest
+from mock import patch
+from reana_commons.config import REANA_WORKFLOW_UMASK
 from reana_commons.errors import REANAValidationError
 from reana_db.models import ResourceType, UserToken, UserTokenStatus, UserTokenType
 from reana_server.utils import (
     _set_quota_period,
+    create_user_workspace,
     filter_input_files,
     get_user_from_token,
+    initialise_workspace_umask,
     is_valid_email,
 )
+
+
+@patch("reana_server.utils.os.umask")
+def test_initialise_workspace_umask(mock_umask):
+    """Set the shared workspace umask on process initialisation."""
+    initialise_workspace_umask()
+
+    mock_umask.assert_called_once_with(REANA_WORKFLOW_UMASK)
+
+
+def test_create_user_workspace_uses_initialised_umask(tmp_path):
+    """Create group-writable workspace directories after initialisation."""
+    workspace = tmp_path / "user-workspace"
+    previous_umask = os.umask(0o022)
+    try:
+        initialise_workspace_umask()
+        create_user_workspace(workspace)
+    finally:
+        os.umask(previous_umask)
+
+    mode = stat.S_IMODE(workspace.stat().st_mode)
+    assert mode == 0o775
 
 
 @pytest.mark.parametrize(

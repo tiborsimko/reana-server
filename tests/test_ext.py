@@ -11,6 +11,7 @@
 import pytest
 from flask import Flask
 from invenio_rest import InvenioREST
+from mock import patch
 
 _TEST_ORIGIN = "https://example.com:30443"
 
@@ -46,6 +47,19 @@ def ext_app():
     InvenioREST(app)
     REANA().init_app(app)
     return app
+
+
+@patch("reana_server.ext.initialise_workspace_umask")
+def test_initialise_workspace_umask(mock_initialise_workspace_umask):
+    """Initialise the workspace umask when loading the full extension."""
+    from reana_server.ext import REANA
+
+    app = Flask(__name__)
+    app.config["SECRET_KEY"] = "test-secret"
+
+    REANA().init_app(app)
+
+    mock_initialise_workspace_umask.assert_called_once_with()
 
 
 @pytest.mark.parametrize("header,value", _EXPECTED_SECURITY_HEADERS.items())

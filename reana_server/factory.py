@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 #
 # This file is part of REANA.
-# Copyright (C) 2017, 2018, 2019, 2020, 2021, 2022, 2024, 2025 CERN.
+# Copyright (C) 2017, 2018, 2019, 2020, 2021, 2022, 2024, 2025, 2026 CERN.
 #
 # REANA is free software; you can redistribute it and/or modify it
 # under the terms of the MIT License; see LICENSE file for more details.
@@ -22,6 +22,8 @@ from invenio_oauthclient.views.settings import blueprint as blueprint_settings
 from reana_commons.config import REANA_LOG_FORMAT, REANA_LOG_LEVEL
 from reana_db.database import Session
 
+from reana_server.utils import initialise_workspace_umask
+
 
 def create_minimal_app(config_mapping=None):
     """REANA Server application factory.
@@ -40,6 +42,7 @@ def create_minimal_app(config_mapping=None):
     - When running the tests, `reana_server.factory.create_minimal_app` is called.
     - When running `generate_openapi_spec.py`, the app is created with `reana_server.factory.create_minimal_app`.
     """
+    initialise_workspace_umask()
     logging.basicConfig(level=REANA_LOG_LEVEL, format=REANA_LOG_FORMAT, force=True)
     app = Flask(__name__)
     app.config.from_object("reana_server.config")

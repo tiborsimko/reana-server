@@ -103,10 +103,14 @@ def is_uuid_v4(uuid_or_name):
     return uuid.hex == uuid_or_name.replace("-", "")
 
 
+def initialise_workspace_umask():
+    """Set the process umask used for shared workflow workspaces."""
+    os.umask(REANA_WORKFLOW_UMASK)
+
+
 def create_user_workspace(user_workspace_path):
     """Create user workspace directory."""
     if not os.path.isdir(user_workspace_path):
-        os.umask(REANA_WORKFLOW_UMASK)
         os.makedirs(user_workspace_path, exist_ok=True)
 
 

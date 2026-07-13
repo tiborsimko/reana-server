@@ -25,6 +25,7 @@ from reana_server import config
 from reana_server.utils import (
     _create_and_associate_local_user,
     _create_and_associate_oauth_user,
+    initialise_workspace_umask,
 )
 
 
@@ -130,6 +131,7 @@ class REANA(object):
 
     def init_app(self, app):
         """Flask application initialization."""
+        initialise_workspace_umask()
         self.init_config(app)
         self.init_error_handlers(app)
         self._validate_security_config(app)
